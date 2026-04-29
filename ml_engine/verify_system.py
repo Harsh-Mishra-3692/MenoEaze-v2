@@ -15,15 +15,26 @@ Uses isolated test user ID to avoid Supabase/VectorDB corruption.
 """
 
 import sys
+import os
+
+# Fix sys.path to prevent shadowing of stdlib modules (like logging.py in this dir)
+# and to allow importing from ml_engine.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir in sys.path:
+    sys.path.remove(script_dir)
+# Also remove empty string if it's there (which represents current directory)
+if "" in sys.path:
+    sys.path.remove("")
+    
+parent_dir = os.path.dirname(script_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 import time
 import json
 import random
 
-try:
-    import requests
-except ImportError:
-    print("ERROR: 'requests' package not installed. Run: pip install requests")
-    sys.exit(1)
+import requests
 
 # ─────────────────────────────────────────────
 # CONFIG

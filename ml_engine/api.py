@@ -243,8 +243,19 @@ async def query(data: QueryRequest):
 async def feedback(data: dict, background_tasks: BackgroundTasks):
 
     try:
-        record = build_feedback_record(**data)
-        background_tasks.add_task(insert_feedback, record)
+        # build_feedback_record expects exactly (user_id, predicted, actual, error).
+        # The request may contain extra keys (sequence, actual_severity, etc.)
+        # so we extract only what the legacy function needs.
+        try:
+            record = build_feedback_record(
+                user_id=data.get("user_id", ""),
+                predicted=data.get("predicted", 0.0),
+                actual=data.get("actual", data.get("actual_severity", 0.0)),
+                error=data.get("error", 0.0),
+            )
+            background_tasks.add_task(insert_feedback, record)
+        except Exception as rec_err:
+            logger.warning(f"[API] build_feedback_record failed (non-fatal): {rec_err}")
 
         # NEW: Pipe feedback data into the continual learning buffer
         sequence = data.get("sequence")
