@@ -1,5 +1,5 @@
 import { generateEmbedding } from "./embedder"
-import { supabaseAdmin } from "@/lib/vector/vectorClient"
+import { supabaseAdmin } from "../vector/vectorClient"
 
 interface RetrievedDoc {
   title: string

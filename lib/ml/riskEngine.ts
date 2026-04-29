@@ -7,6 +7,7 @@ export interface SymptomLog {
     mood?: string
     mood_score?: number
     sleep?: number
+    sleep_quality?: number
     sleep_hours?: number
     notes?: string
     date?: string

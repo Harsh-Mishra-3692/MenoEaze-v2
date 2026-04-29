@@ -1,14 +1,14 @@
 // lib/assistant/contextBuilder.ts
 
-import { analyzeUserData } from "@/lib/ml"
-import { retrieveRelevantDocs } from "@/lib/rag/retriever"
-import { supabaseAdmin } from "@/lib/vector/vectorClient"
+import { analyzeUserData } from "../ml"
+import { retrieveRelevantDocs } from "../rag/retriever"
+import { supabaseAdmin } from "../vector/vectorClient"
 
 export async function buildAssistantContext(userId: string, message: string) {
     // Fetch symptom logs with all fields for rich context
     const { data: logs } = await supabaseAdmin
         .from("symptom_logs")
-        .select("symptom_type, severity, mood, sleep, notes, created_at")
+        .select("severity, mood_score, sleep_quality, hot_flash_score, night_sweats_score, fatigue_score, anxiety_score, stress_level, notes, created_at")
         .eq("user_id", userId)
         .eq("is_deleted", false)
         .order("created_at", { ascending: false })
@@ -40,7 +40,18 @@ export async function buildAssistantContext(userId: string, message: string) {
                 month: "short",
                 day: "numeric"
             })
-            return `${date}: ${l.symptom_type} (severity ${l.severity}/10), mood: ${l.mood || "N/A"}, sleep: ${l.sleep || "N/A"}/10${l.notes ? `, notes: ${l.notes}` : ""}`
+            
+            // Collect the top symptoms for this day
+            const activeSymptoms = []
+            if (l.hot_flash_score > 3) activeSymptoms.push(`hot flashes (${l.hot_flash_score}/10)`)
+            if (l.night_sweats_score > 3) activeSymptoms.push(`night sweats (${l.night_sweats_score}/10)`)
+            if (l.fatigue_score > 3) activeSymptoms.push(`fatigue (${l.fatigue_score}/10)`)
+            if (l.anxiety_score > 3) activeSymptoms.push(`anxiety (${l.anxiety_score}/10)`)
+            if (l.stress_level > 3) activeSymptoms.push(`stress (${l.stress_level}/10)`)
+            
+            const symptomStr = activeSymptoms.length > 0 ? activeSymptoms.join(", ") : "mild/no specific symptoms"
+            
+            return `${date}: overall severity ${l.severity ?? "N/A"}/10, mood: ${l.mood_score ?? "N/A"}/10, sleep: ${l.sleep_quality ?? "N/A"}/10. Notable: ${symptomStr}${l.notes ? `. Notes: ${l.notes}` : ""}`
         })
         .join("\n")
 

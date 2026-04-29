@@ -5,21 +5,17 @@ import { motion, AnimatePresence } from "framer-motion"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import ChatHeader from "./ChatHeader"
-import CitationCard from "./CitationCard"
+import CitationCard, { Citation } from "./CitationCard"
 import { Send, Sparkles, ArrowDown } from "lucide-react"
 
 interface Message {
     role: "user" | "assistant"
     content: string
     timestamp: Date
+    citations?: Citation[]
 }
 
-interface Citation {
-    title: string
-    source: string
-    content: string
-    similarity?: number
-}
+
 
 interface Props {
     userId: string
@@ -35,7 +31,6 @@ const SUGGESTIONS = [
 
 export default function AssistantChat({ userId, userEmail }: Props) {
     const [messages, setMessages] = useState<Message[]>([])
-    const [citations, setCitations] = useState<Citation[]>([])
     const [input, setInput] = useState("")
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -106,11 +101,11 @@ export default function AssistantChat({ userId, userEmail }: Props) {
                 const assistantMessage: Message = {
                     role: "assistant",
                     content: data.reply,
-                    timestamp: new Date()
+                    timestamp: new Date(),
+                    citations: data.citations || []
                 }
 
                 setMessages(prev => [...prev, assistantMessage])
-                setCitations(data.citations || [])
             } catch (err) {
                 setError(
                     err instanceof Error ? err.message : "Something went wrong"
@@ -192,22 +187,6 @@ export default function AssistantChat({ userId, userEmail }: Props) {
                                 >
                                     Retry
                                 </button>
-                            </motion.div>
-                        )}
-
-                        {/* Citations */}
-                        {citations.length > 0 && (
-                            <motion.div
-                                initial={{ opacity: 0, y: 8 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                className="pt-3 space-y-2"
-                            >
-                                <p className="text-xs text-gray-500 uppercase tracking-wider font-medium px-1">
-                                    Sources
-                                </p>
-                                {citations.map((c, i) => (
-                                    <CitationCard key={i} citation={c} />
-                                ))}
                             </motion.div>
                         )}
 
@@ -348,10 +327,25 @@ function MessageBubble({ message }: { message: Message }) {
                 {isUser ? (
                     <p className="whitespace-pre-wrap">{message.content}</p>
                 ) : (
-                    <div className="prose prose-invert prose-sm max-w-none prose-p:my-1.5 prose-headings:text-gray-200 prose-strong:text-gray-200 prose-a:text-purple-400 prose-code:text-pink-400 prose-code:bg-white/5 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                            {message.content}
-                        </ReactMarkdown>
+                    <div className="flex flex-col gap-3">
+                        <div className="prose prose-invert prose-sm max-w-none prose-p:my-1.5 prose-headings:text-gray-200 prose-strong:text-gray-200 prose-a:text-purple-400 prose-code:text-pink-400 prose-code:bg-white/5 prose-code:px-1.5 prose-code:py-0.5 prose-code:rounded prose-pre:bg-white/5 prose-pre:border prose-pre:border-white/10 prose-li:my-0.5 prose-ul:my-2 prose-ol:my-2">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {message.content}
+                            </ReactMarkdown>
+                        </div>
+                        
+                        {message.citations && message.citations.length > 0 && (
+                            <div className="pt-2 mt-2 border-t border-white/[0.06] space-y-2">
+                                <p className="text-xs text-gray-400 uppercase tracking-wider font-medium px-1">
+                                    Sources
+                                </p>
+                                <div className="space-y-1.5">
+                                    {message.citations.map((c, i) => (
+                                        <CitationCard key={i} citation={c} />
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>

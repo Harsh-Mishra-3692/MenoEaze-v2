@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
-import { getGroq } from "@/lib/groq/client"
-import { isMenopauseRelated } from "@/lib/assistant/domainGuard"
+import { getGroq } from "../../../lib/groq/client"
+import { isMenopauseRelated } from "../../../lib/assistant/domainGuard"
 
 export async function POST(req: Request) {
   try {
@@ -67,7 +67,7 @@ Respond as MenoEaze. Be the friend she needs right now. Be real. Be warm. Be bri
 
     // Save to chat history (non-blocking, won't fail the response)
     try {
-      const { supabaseAdmin } = await import("@/lib/vector/vectorClient")
+      const { supabaseAdmin } = await import("../../../lib/vector/vectorClient")
       supabaseAdmin
         .from("chat_messages")
         .insert([

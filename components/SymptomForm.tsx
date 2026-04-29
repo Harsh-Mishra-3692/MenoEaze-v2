@@ -1,13 +1,13 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
+import { supabase } from '../lib/supabase'
 import {
   UserSymptomFeatures,
   FEATURE_KEYS,
   buildSequenceMatrix,
   featuresToRow
-} from '@/lib/ml/types'
+} from '../lib/ml/types'
 
 interface Props {
   onSuccess?: () => void

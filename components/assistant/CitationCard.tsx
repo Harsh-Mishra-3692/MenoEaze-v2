@@ -3,7 +3,7 @@
 import { useState } from "react"
 import { ChevronDown, ChevronUp, FileText } from "lucide-react"
 
-interface Citation {
+export interface Citation {
     title: string
     source: string
     content: string

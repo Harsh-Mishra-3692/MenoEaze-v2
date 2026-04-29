@@ -22,7 +22,7 @@ function pearson(x: number[], y: number[]) {
 }
 
 export function calculateCorrelations(logs: SymptomLog[]): CorrelationResult {
-    const sleep = logs.map(l => l.sleep ?? l.sleep_hours ?? 0)
+    const sleep = logs.map(l => l.sleep_quality ?? l.sleep ?? l.sleep_hours ?? 0)
     const severity = logs.map(l => l.severity ?? l.symptom_severity ?? 0)
     const mood = logs.map(l => l.mood_score ?? (typeof l.mood === 'string' ? 5 : 0))
 
