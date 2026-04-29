@@ -35,9 +35,13 @@ def train_incremental(batch: Tuple[torch.Tensor, torch.Tensor]) -> None:
     X = X.to(torch.float32)
     y = y.to(torch.float32)
 
-    # Assert shapes strictly to prevent silent failures
-    assert X.dim() == 3, f"Expected 3D tensor for X (batch, seq, features), got {X.dim()}"
-    assert y.dim() == 2, f"Expected 2D tensor for y (batch, 1), got {y.dim()}"
+    # Soft shape validation (asserts crash the daemon thread with cryptic errors)
+    if X.dim() != 3:
+        logger.error(f"[TRAIN] Shape violation: Expected 3D tensor for X (batch, seq, features), got {X.dim()}D. Skipping batch.")
+        return
+    if y.dim() != 2:
+        logger.error(f"[TRAIN] Shape violation: Expected 2D tensor for y (batch, 1), got {y.dim()}D. Skipping batch.")
+        return
 
     # 2. Load the current active model safely
     try:

@@ -56,7 +56,7 @@ def select_strategy(
 ) -> str:
     """
     Returns:
-        'none' | 'bias' | 'adapt'
+        'none' | 'bias' | 'maml' | 'adapt'
     """
 
     try:
@@ -65,38 +65,48 @@ def select_strategy(
 
         predictions = user_history.get("predictions", [])
         actuals = user_history.get("actuals", [])
+        feedback_logs = user_history.get("feedback_logs", [])
 
-        if not predictions or not actuals:
+        # Phase 5: MAML uses feedback_logs (raw sequence + actual_severity dicts)
+        # independently of the predictions/actuals alignment.
+        # Check this FIRST since a user may have feedback_logs without
+        # aligned pred/actual pairs (e.g., submitted feedback but no /run calls).
+        n_feedback = len(feedback_logs)
+
+        # Standard pred/actual alignment count
+        n = min(len(predictions), len(actuals)) if predictions and actuals else 0
+
+        # ── Not enough data from either source ───
+        if n < MIN_HISTORY and n_feedback < MAML_THRESHOLD:
             return "none"
 
-        n = min(len(predictions), len(actuals))
+        # ── Extract features (only if we have aligned pred/actual data) ──
+        if n >= MIN_HISTORY:
+            feats = _extract_error_features(predictions[-30:], actuals[-30:])
 
-        # ── Not enough data ───────────────────
-        if n < MIN_HISTORY:
-            return "none"
+            variance = feats["variance"]
+            trend = abs(feats["trend"])
 
-        # ── Extract features ──────────────────
-        feats = _extract_error_features(predictions[-30:], actuals[-30:])
+            # ── Noisy data → avoid adaptation ─────
+            if variance > MAX_VARIANCE:
+                return "bias"
 
-        variance = feats["variance"]
-        trend = abs(feats["trend"])
-
-        # ── Noisy data → avoid adaptation ─────
-        if variance > MAX_VARIANCE:
-            return "bias"
-
-        # ── Enough data for full adaptation ───
-        if n >= ADAPT_THRESHOLD and trend > TREND_THRESHOLD:
-            return "adapt"
+            # ── Enough data for full adaptation ───
+            if n >= ADAPT_THRESHOLD and trend > TREND_THRESHOLD:
+                return "adapt"
 
         # ── Phase 5: MAML fast adaptation ─────
-        # Requires fewer samples than full adapt but more than bias.
-        # Works alongside EMA — only triggers if user has real feedback.
-        if n >= MAML_THRESHOLD:
+        # Requires feedback_logs with sequence + actual_severity.
+        # Fewer samples needed than full adapt, more than bias.
+        if n_feedback >= MAML_THRESHOLD:
             return "maml"
 
+        # ── Have some pred/actual data but not enough for MAML ───
+        if n >= MIN_HISTORY:
+            return "bias"
+
         # ── Default safe option ───────────────
-        return "bias"
+        return "none"
 
     except Exception as e:
         logger.error(f"[Gating] failed: {e}")

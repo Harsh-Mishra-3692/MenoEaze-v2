@@ -27,6 +27,16 @@ def worker_loop(check_interval_seconds: int = 60, min_batch_size: int = 50):
             
             # If batch exists and is valid
             if x_batch.numel() > 0 and y_batch.numel() > 0:
+                # BUG 5 FIX: Defensive NaN/Inf check on dequeued batch
+                if torch.isnan(x_batch).any() or torch.isinf(x_batch).any():
+                    logger.warning("[WORKER] Corrupted batch (NaN/Inf in X). Discarding.")
+                    time.sleep(check_interval_seconds)
+                    continue
+                if torch.isnan(y_batch).any() or torch.isinf(y_batch).any():
+                    logger.warning("[WORKER] Corrupted batch (NaN/Inf in y). Discarding.")
+                    time.sleep(check_interval_seconds)
+                    continue
+
                 logger.info(f"[WORKER] Found valid batch of size {x_batch.size(0)}. Triggering incremental training...")
                 
                 # Trigger Phase 2 training

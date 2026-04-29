@@ -132,6 +132,7 @@ def fast_adapt_user_model(
     y_support = y_support.to(device)
 
     clone = None
+    _support_allocated = True  # Track for safe cleanup in finally
     try:
         # 1. Create a fully isolated deep copy — NEVER touch base_model
         clone = copy.deepcopy(base_model)
@@ -173,8 +174,9 @@ def fast_adapt_user_model(
         return None
 
     finally:
-        # Always clean up support tensors
-        del X_support, y_support
+        # Always clean up support tensors if they were allocated
+        if _support_allocated:
+            del X_support, y_support
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
