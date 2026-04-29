@@ -97,9 +97,7 @@ export default function Header() {
               </>
             )}
 
-            <Link href="/community" className={navClass('/community')}>
-              Community
-            </Link>
+
 
             {isAuthenticated ? (
               <div className="relative ml-4" ref={dropdownRef}>
@@ -191,9 +189,7 @@ export default function Header() {
                     </button>
                   </>
                 )}
-                <Link href="/community" onClick={() => setMobileOpen(false)} className={navClass('/community')}>
-                  Community
-                </Link>
+
 
                 {isAuthenticated ? (
                   <div className="border-t pt-4 mt-2">

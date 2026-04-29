@@ -77,11 +77,8 @@ export default function Footer() {
                 </>
               )}
 
-              <li>
-                <Link href="/community" className="hover:text-white transition">
-                  Community
-                </Link>
-              </li>
+
+
 
               {!isLoggedIn && (
                 <li>

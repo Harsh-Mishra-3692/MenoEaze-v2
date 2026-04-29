@@ -16,9 +16,19 @@ import {
 
 type Symptom = {
   severity: number
-  mood: string | null
+  mood_score: number | null
   symptom_type: string | null
   created_at: string
+  hot_flash_score: number | null
+  night_sweats_score: number | null
+  sleep_quality: number | null
+  fatigue_score: number | null
+  anxiety_score: number | null
+  physical_activity: number | null
+  stress_level: number | null
+  caffeine_intake: number | null
+  age: number | null
+  bmi: number | null
 }
 
 export default function AnalysisCard({ userId }: { userId: string }) {
@@ -26,6 +36,8 @@ export default function AnalysisCard({ userId }: { userId: string }) {
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<'weekly' | 'monthly'>('weekly')
   const [mlForecast, setMlForecast] = useState<number | null>(null)
+  const [mlStrategy, setMlStrategy] = useState<string | null>(null)
+  const [mlConfidence, setMlConfidence] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [aiInsight, setAiInsight] = useState<string | null>(null)
   const [insightLoading, setInsightLoading] = useState(false)
@@ -36,7 +48,7 @@ export default function AnalysisCard({ userId }: { userId: string }) {
     const fetchLogs = async () => {
       const { data, error } = await supabase
         .from('symptom_logs')
-        .select('severity, mood, symptom_type, created_at')
+        .select('severity, mood_score, symptom_type, created_at, hot_flash_score, night_sweats_score, sleep_quality, fatigue_score, anxiety_score, physical_activity, stress_level, caffeine_intake, age, bmi')
         .eq('user_id', userId)
         .eq('is_deleted', false)
         .order('created_at', { ascending: true })
@@ -89,24 +101,22 @@ export default function AnalysisCard({ userId }: { userId: string }) {
 
     const callML = async () => {
       try {
-        // Build a (5, 11) sequence from the last 5 logs
-        // Features: hot_flash, night_sweats, sleep, mood, fatigue,
-        //           anxiety, activity, stress, caffeine, age, bmi
+        // Build a (5, 11) sequence from the last 5 logs using real data
         const recent = logs.slice(-5)
         const sequence = recent.map(l => {
-          const sev = (l.severity ?? 0) / 10  // normalize to [0,1]
+          const sev = (l.severity ?? 0) / 10
           return [
-            sev,                                   // hot_flash_score (proxy)
-            sev * 0.9,                             // night_sweats_score (proxy)
-            1 - sev,                               // sleep_quality (inverse)
-            1 - sev,                               // mood_score (inverse)
-            sev * 0.8,                             // fatigue_score (proxy)
-            sev * 0.7,                             // anxiety_score (proxy)
-            Math.max(0, 0.5 - sev * 0.3),         // physical_activity
-            sev * 0.6,                             // stress_level (proxy)
-            0.5,                                   // caffeine_intake (default)
-            0.5,                                   // age (normalized)
-            0.45,                                  // bmi (normalized)
+            (l.hot_flash_score ?? sev * 10) / 10,
+            (l.night_sweats_score ?? sev * 9) / 10,
+            (l.sleep_quality ?? (1 - sev) * 10) / 10,
+            (l.mood_score ?? (1 - sev) * 10) / 10,
+            (l.fatigue_score ?? sev * 8) / 10,
+            (l.anxiety_score ?? sev * 7) / 10,
+            (l.physical_activity ?? Math.max(0, 5 - sev * 3)) / 10,
+            (l.stress_level ?? sev * 6) / 10,
+            (l.caffeine_intake ?? 2) / 5,
+            (l.age ?? 50 - 30) / 40,
+            (l.bmi ?? 25 - 15) / 35,
           ]
         })
 
@@ -127,8 +137,13 @@ export default function AnalysisCard({ userId }: { userId: string }) {
 
         const data = await response.json()
         if (typeof data.severity === 'number') {
-          // Convert from [0,1] to [0,10] scale for display
           setMlForecast(Number((data.severity * 10).toFixed(2)))
+        }
+        if (data.strategy) {
+          setMlStrategy(data.strategy)
+        }
+        if (typeof data.confidence === 'number') {
+          setMlConfidence(data.confidence)
         }
       } catch {
         // silent fail — ML backend may not be running
@@ -313,15 +328,34 @@ export default function AnalysisCard({ userId }: { userId: string }) {
             transition={{ delay: 0.3 }}
             className="bg-gradient-to-r from-blue-50 to-cyan-50 rounded-xl p-4 border border-blue-100/60"
           >
-            <p className="text-xs text-gray-500 font-medium mb-1">
-              🤖 ML Prediction
-            </p>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-xs text-gray-500 font-medium">
+                🤖 ML Prediction
+              </p>
+              {mlStrategy === 'maml' && (
+                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-orange-400 text-white animate-pulse">
+                  ⚡ MAML Active
+                </span>
+              )}
+              {mlStrategy === 'bias' && (
+                <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-purple-100 text-purple-600">
+                  Bias-Corrected
+                </span>
+              )}
+            </div>
             <p className="text-lg font-semibold text-gray-800">
               {mlForecast}<span className="text-sm text-gray-400 font-normal">/10</span>
             </p>
-            <p className="text-xs text-gray-500 mt-1">
-              AI-powered severity estimate
-            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <p className="text-xs text-gray-500">
+                {mlStrategy === 'maml' ? 'Hyper-Personalized' : 'AI severity estimate'}
+              </p>
+              {mlConfidence !== null && (
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-blue-100 text-blue-600">
+                  {Math.round(mlConfidence * 100)}% conf
+                </span>
+              )}
+            </div>
           </motion.div>
         )}
       </div>

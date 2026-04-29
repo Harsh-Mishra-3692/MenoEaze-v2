@@ -18,6 +18,7 @@ interface Citation {
     title: string
     source: string
     content: string
+    similarity?: number
 }
 
 interface Props {

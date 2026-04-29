@@ -114,41 +114,47 @@ def _is_context_valid(docs: List[Dict[str, Any]]) -> bool:
 # FALLBACK (SAFETY-FIRST MODE)
 # ─────────────────────────────────────────────
 def _fallback(level: str) -> str:
-    _doctor_note = " Please consult a healthcare professional for personalized medical advice."
+    _doctor_note = " And if things feel overwhelming, talking to your doctor can really help — you deserve that support."
     if level == "low":
-        return ("I do not have sufficient clinical evidence for this specific query. "
-                "Based on general wellness guidelines, focus on sleep hygiene, hydration, "
-                "and balanced nutrition." + _doctor_note)
+        return ("I don't have specific research on that right now, but I want you to know that what you're experiencing is real and valid. "
+                "In the meantime, gentle things like prioritizing sleep, staying hydrated, and nourishing your body with whole foods "
+                "can make a quiet but meaningful difference." + _doctor_note)
     elif level == "medium":
-        return ("I do not have sufficient clinical evidence for this specific query. "
-                "Moderate symptoms may benefit from lifestyle adjustments and stress management." + _doctor_note)
-    return ("I do not have sufficient clinical evidence for this specific query. "
-            "Given the severity level, it is strongly recommended that you seek "
-            "professional medical evaluation promptly." + _doctor_note)
+        return ("I wish I had more specific information for you on this one. What I can say is that when symptoms are at this level, "
+                "small, consistent shifts — like stress-relief techniques, gentle movement, and being intentional about rest — "
+                "can start to move the needle." + _doctor_note)
+    return ("I don't have enough information to give you the thorough answer you deserve on this, and I'm sorry about that. "
+            "With what you're going through right now, I'd really encourage you to reach out to your healthcare provider soon. "
+            "You don't have to push through this alone, and getting professional support is a sign of strength, not weakness. 💜")
 
 
 # ─────────────────────────────────────────────
-# PROMPT BUILDER (STRONGER)
+# PROMPT BUILDER (EMPATHETIC + EVIDENCE-GROUNDED)
 # ─────────────────────────────────────────────
 def _build_prompt(query: str, level: str, symptoms: str, context: str) -> str:
-    return f"""You are a STRICT clinical assistant for menopause health.
+    return f"""You are MenoEaze — a compassionate, knowledgeable women's health companion who speaks with warmth and genuine care. You feel like a trusted friend who also happens to have deep medical knowledge.
 
-ABSOLUTE RULES:
-- Answer ONLY using the provided CONTEXT below. Do not use prior knowledge.
-- If the answer is not in the CONTEXT, state clearly: "I do not have sufficient evidence to answer this."
-- DO NOT hallucinate, speculate, or provide medical advice outside the CONTEXT.
-- Be medically safe, concise, and actionable.
-- Tailor your response to the patient's severity level.
+CORE PRINCIPLES:
+- ONLY use information from the CONTEXT provided below. Do not draw on outside knowledge.
+- If the answer isn't in the CONTEXT, be honest and gentle: "I don't have specific information on that right now, but here's what might help..."
+- Never speculate or fabricate medical claims.
+- Prioritize natural remedies and lifestyle approaches first, then mention clinical options.
+- Tailor your warmth and urgency to the person's severity level.
 
-User Query: {query}
-Severity Level: {level}
-Symptoms: {symptoms}
+YOUR VOICE:
+- Open by acknowledging what the person is going through — show you heard them
+- Use warm, conversational language. Say "you're" not "you are". Say "that's" not "that is".
+- Keep it to 2-3 short paragraphs of flowing prose. No bullet lists, no markdown headers, no tables.
+- Close with gentle encouragement or a caring thought — never a legal disclaimer.
+
+User's question: {query}
+Their severity level: {level}
+Their symptoms: {symptoms}
 
 CONTEXT:
 {context}
 
-Answer:
-"""
+Respond with warmth, brevity, and evidence from the context above. Be the caring, knowledgeable friend she needs right now."""
 
 
 # ─────────────────────────────────────────────

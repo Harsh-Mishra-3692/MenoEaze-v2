@@ -7,6 +7,7 @@ interface Citation {
     title: string
     source: string
     content: string
+    similarity?: number
 }
 
 export default function CitationCard({ citation }: { citation: Citation }) {
@@ -24,9 +25,16 @@ export default function CitationCard({ citation }: { citation: Citation }) {
 
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm text-gray-300 font-medium truncate">
-                            {citation.title || citation.source}
-                        </p>
+                        <div className="flex items-center gap-2 overflow-hidden">
+                            <p className="text-sm text-gray-300 font-medium truncate">
+                                {citation.title || citation.source}
+                            </p>
+                            {citation.similarity !== undefined && (
+                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 flex-shrink-0">
+                                    {Math.round(citation.similarity * 100)}% match
+                                </span>
+                            )}
+                        </div>
                         {expanded ? (
                             <ChevronUp size={14} className="text-gray-600 flex-shrink-0" />
                         ) : (
