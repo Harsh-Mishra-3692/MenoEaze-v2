@@ -60,6 +60,7 @@ def train_incremental(batch: Tuple[torch.Tensor, torch.Tensor]) -> None:
     criterion = nn.MSELoss()
 
     # 5. Run exactly 3 epochs (task-specific inner loop)
+    _training_corrupted = False
     for epoch in range(INCREMENTAL_EPOCHS):
         optimizer.zero_grad()
 
@@ -67,11 +68,32 @@ def train_incremental(batch: Tuple[torch.Tensor, torch.Tensor]) -> None:
         predictions = predictions.view_as(y)
         loss = criterion(predictions, y)
 
+        # NUMERICAL STABILITY: If loss is NaN/Inf, the batch is poisoned.
+        # Skip gradient update and abort the Reptile meta-update entirely.
+        if not torch.isfinite(loss):
+            logger.error(f"[TRAIN] NaN/Inf loss detected at epoch {epoch}. Aborting batch to protect model weights.")
+            _training_corrupted = True
+            break
+
         loss.backward()
+
+        # Check for NaN gradients before stepping
+        has_nan_grad = any(
+            p.grad is not None and (torch.isnan(p.grad).any() or torch.isinf(p.grad).any())
+            for p in model.parameters()
+        )
+        if has_nan_grad:
+            logger.error(f"[TRAIN] NaN/Inf gradient detected at epoch {epoch}. Aborting batch.")
+            _training_corrupted = True
+            break
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP_NORM)
 
         optimizer.step()
+
+    if _training_corrupted:
+        logger.warning("[TRAIN] Skipping Reptile meta-update and model save due to numerical corruption.")
+        return
 
     logger.info(f"[TRAIN] Inner loop finished. Final batch loss: {loss.item():.4f}")
 

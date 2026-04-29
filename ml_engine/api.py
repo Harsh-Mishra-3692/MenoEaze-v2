@@ -1,6 +1,7 @@
 # api.py — ELITE (PRODUCTION-GRADE ORCHESTRATOR + CONTINUAL LEARNING)
 
 import time
+import math
 import asyncio
 import logging
 from typing import Dict, List, Optional
@@ -100,7 +101,12 @@ class RunRequest(BaseModel):
         arr = np.array(v, dtype=np.float32)
         if arr.shape != (SEQ_LEN, FEATURES):
             raise ValueError(f"Expected shape {(SEQ_LEN, FEATURES)}")
-        return v
+        
+        if not np.isfinite(arr).all():
+            logger.warning("[SECURITY WARNING] Non-finite values (NaN/Inf) detected in RunRequest sequence. Defensively imputing with 0.0.")
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            
+        return arr.tolist()
 
 
 class PredictRequest(BaseModel):
@@ -113,7 +119,12 @@ class PredictRequest(BaseModel):
         arr = np.array(v, dtype=np.float32)
         if arr.shape != (SEQ_LEN, FEATURES):
             raise ValueError(f"Expected shape {(SEQ_LEN, FEATURES)}")
-        return v
+            
+        if not np.isfinite(arr).all():
+            logger.warning("[SECURITY WARNING] Non-finite values (NaN/Inf) detected in PredictRequest sequence. Defensively imputing with 0.0.")
+            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+            
+        return arr.tolist()
 
 
 class QueryRequest(BaseModel):
@@ -260,6 +271,27 @@ async def feedback(data: dict, background_tasks: BackgroundTasks):
         # NEW: Pipe feedback data into the continual learning buffer
         sequence = data.get("sequence")
         actual_severity = data.get("actual_severity")
+
+        # SECURITY GUARD: Sanitize sequence and actual_severity to prevent NaN poisoning
+        if sequence is not None:
+            try:
+                seq_arr = np.array(sequence, dtype=np.float32)
+                if not np.isfinite(seq_arr).all():
+                    logger.warning("[SECURITY WARNING] Non-finite values in feedback sequence. Defensively imputing with 0.0.")
+                    seq_arr = np.nan_to_num(seq_arr, nan=0.0, posinf=0.0, neginf=0.0)
+                sequence = seq_arr.tolist()
+            except Exception:
+                sequence = None
+
+        if actual_severity is not None:
+            try:
+                actual_sev_float = float(actual_severity)
+                if not math.isfinite(actual_sev_float):
+                    logger.warning("[SECURITY WARNING] Non-finite value in feedback actual_severity. Imputing to 0.0.")
+                    actual_sev_float = 0.0
+                actual_severity = actual_sev_float
+            except Exception:
+                actual_severity = None
 
         if sequence is not None and actual_severity is not None:
             try:

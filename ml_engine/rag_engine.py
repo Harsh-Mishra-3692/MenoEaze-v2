@@ -20,8 +20,33 @@ MIN_RETRIEVAL_SCORE = 0.2
 # ─────────────────────────────────────────────
 # SANITIZATION
 # ─────────────────────────────────────────────
+# Patterns that indicate prompt injection attempts
+_INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?previous\s+instructions",
+    r"ignore\s+(all\s+)?above",
+    r"you\s+are\s+now",
+    r"new\s+instruction",
+    r"system\s*:",
+    r"assistant\s*:",
+    r"human\s*:",
+    r"forget\s+(everything|all)",
+    r"disregard\s+(all|previous|above)",
+    r"override\s+(system|prompt|rules)",
+    r"act\s+as\s+(if|a|an)",
+    r"pretend\s+(you|to)",
+]
+
 def _sanitize(text: str) -> str:
-    text = re.sub(r"[^a-zA-Z0-9\s\-_,.]", " ", text or "")
+    text = (text or "").strip()
+
+    # Prompt injection defense: strip adversarial override attempts
+    text_lower = text.lower()
+    for pattern in _INJECTION_PATTERNS:
+        if re.search(pattern, text_lower):
+            logger.warning(f"[RAG] Prompt injection attempt detected and neutralized.")
+            text = re.sub(pattern, "", text_lower, flags=re.IGNORECASE)
+
+    text = re.sub(r"[^a-zA-Z0-9\s\-_,.]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:MAX_QUERY_LENGTH]
 
@@ -86,14 +111,20 @@ def _is_context_valid(docs: List[Dict[str, Any]]) -> bool:
 
 
 # ─────────────────────────────────────────────
-# FALLBACK
+# FALLBACK (SAFETY-FIRST MODE)
 # ─────────────────────────────────────────────
 def _fallback(level: str) -> str:
+    _doctor_note = " Please consult a healthcare professional for personalized medical advice."
     if level == "low":
-        return "Mild symptoms. Focus on sleep, hydration, and lifestyle improvements."
+        return ("I do not have sufficient clinical evidence for this specific query. "
+                "Based on general wellness guidelines, focus on sleep hygiene, hydration, "
+                "and balanced nutrition." + _doctor_note)
     elif level == "medium":
-        return "Moderate symptoms. Consider lifestyle adjustments and medical advice."
-    return "Severe symptoms. Please consult a healthcare professional."
+        return ("I do not have sufficient clinical evidence for this specific query. "
+                "Moderate symptoms may benefit from lifestyle adjustments and stress management." + _doctor_note)
+    return ("I do not have sufficient clinical evidence for this specific query. "
+            "Given the severity level, it is strongly recommended that you seek "
+            "professional medical evaluation promptly." + _doctor_note)
 
 
 # ─────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import threading
 import torch
+from collections import deque
 from typing import Tuple, List
 
 class OnlineLearningBuffer:
@@ -9,7 +10,7 @@ class OnlineLearningBuffer:
     
     Hard constraints implemented:
     - Thread-safety via threading.Lock()
-    - Strict memory bounding via max_capacity
+    - Strict memory bounding via deque(maxlen=...) — O(1) circular buffer
     - Defensive dropping of NaN/Inf tensors
     """
     
@@ -17,13 +18,14 @@ class OnlineLearningBuffer:
         self.max_capacity = max_capacity
         self.lock = threading.Lock()
         
-        self.sequences: List[torch.Tensor] = []
-        self.targets: List[torch.Tensor] = []
+        # O(1) circular buffer: auto-drops oldest when full (no list copy)
+        self.sequences: deque = deque(maxlen=max_capacity)
+        self.targets: deque = deque(maxlen=max_capacity)
         
     def add_sample(self, x: torch.Tensor, y: torch.Tensor) -> None:
         """
         Safely appends a new sequence and target to the buffer.
-        If the buffer reaches max_capacity, the oldest samples are dropped to prevent OOM.
+        deque(maxlen=...) automatically drops the oldest sample when full — O(1).
         
         Args:
             x: Tensor of shape (seq_len, num_features)
@@ -40,12 +42,6 @@ class OnlineLearningBuffer:
             # Force CPU detachment to prevent GPU memory leaks from autograd graphs
             self.sequences.append(x.detach().cpu())
             self.targets.append(y.detach().cpu())
-            
-            # Enforce strict memory bounds
-            if len(self.sequences) > self.max_capacity:
-                excess = len(self.sequences) - self.max_capacity
-                self.sequences = self.sequences[excess:]
-                self.targets = self.targets[excess:]
                 
     def get_batch(self, min_size: int = 100) -> Tuple[torch.Tensor, torch.Tensor]:
         """

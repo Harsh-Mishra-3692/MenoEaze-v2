@@ -74,8 +74,26 @@ def predict_pipeline(
         user_history = _safe_history(user_history)
         x = _prepare_input(sequence)
 
+        # CONCURRENCY SAFETY: Capture a local reference to the model.
+        # If _periodic_model_refresh hot-swaps pipeline._model during
+        # this forward pass, the local ref keeps the old model alive
+        # until this request completes (Python GC won't collect it).
+        model_ref = _model
+
         with torch.no_grad():
-            base_pred = float(np.clip(_model(x).item(), 0, 1))
+            raw_output = model_ref(x).item()
+
+        # NORMALIZATION DRIFT DETECTION: If the raw model output is far
+        # outside [0,1], the input scalers are stale or the model has drifted.
+        # Clipping to [0,1] masks this — MAML/bias cannot adapt at the boundary.
+        if raw_output < -0.5 or raw_output > 1.5:
+            logger.warning(
+                f"[Pipeline] NORMALIZATION DRIFT: raw GRU output={raw_output:.4f} "
+                f"is far outside [0,1]. Input scalers may be stale. "
+                f"Consider rerunning preprocess.py and retraining."
+            )
+
+        base_pred = float(np.clip(raw_output, 0, 1))
 
         strategy = select_strategy(user_history)
 
@@ -101,7 +119,7 @@ def predict_pipeline(
             feedback_logs = user_history.get("feedback_logs", [])
 
             if feedback_logs:
-                maml_pred = maml_predict(_model, x, feedback_logs)
+                maml_pred = maml_predict(model_ref, x, feedback_logs)
 
                 if maml_pred is not None:
                     final_pred = maml_pred
@@ -113,7 +131,7 @@ def predict_pipeline(
                 logger.info("[Pipeline] MAML selected but no feedback_logs available, using base.")
 
         elif strategy == "adapt":
-            adapted_pred = apply_adaptation(_model, x, user_id)
+            adapted_pred = apply_adaptation(model_ref, x, user_id)
 
             if adapted_pred is not None:
                 final_pred = adapted_pred
