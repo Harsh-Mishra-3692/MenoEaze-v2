@@ -173,7 +173,7 @@ export default function AuthPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-gradient-to-r from-purple-600 to-pink-500 text-white py-2 rounded-lg font-semibold hover:shadow-lg transition disabled:opacity-60"
+            className="w-full bg-gradient-to-r from-purple-600 to-pink-500 text-white py-2 min-h-[44px] flex items-center justify-center rounded-lg font-semibold hover:shadow-lg transition disabled:opacity-60"
           >
             {loading
               ? 'Processing...'

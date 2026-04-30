@@ -59,13 +59,12 @@ export default function HomePage() {
               <div className="absolute -inset-4 rounded-full animate-halo-spin" style={{ background: 'conic-gradient(from 0deg, transparent, rgba(168,85,247,0.3), rgba(236,72,153,0.3), transparent)' }} />
               {/* Glow container */}
               <div className="relative w-28 h-28 md:w-32 md:h-32 rounded-full animate-glow-pulse bg-white/20 backdrop-blur-md border border-white/30 flex items-center justify-center">
-                <div className="animate-gentle-float">
+                <div className="animate-gentle-float w-full h-full relative">
                   <Image
-                    src="/image1.png"
-                    alt="MenoEaze — Your Menopause Wellness Companion"
-                    width={100}
-                    height={100}
-                    className="rounded-full drop-shadow-lg w-20 h-20 md:w-24 md:h-24 object-contain"
+                    src="/images/logo-circle.png"
+                    alt="MenoEaze Logo"
+                    fill
+                    className="rounded-full drop-shadow-lg object-cover"
                     priority
                   />
                 </div>
@@ -103,16 +102,16 @@ export default function HomePage() {
           <div className="flex flex-col sm:flex-row justify-center gap-4">
             <Link
               href="/auth"
-              className="bg-white text-purple-600 px-8 py-3 rounded-xl font-semibold shadow-lg hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"
+              className="bg-white text-purple-600 px-8 py-3 min-h-[44px] flex items-center justify-center rounded-xl font-semibold shadow-lg hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"
             >
-              Get Started Free
+              View My Personalized Analysis
             </Link>
 
             <Link
-              href="/community"
-              className="border border-white px-8 py-3 rounded-xl font-semibold hover:bg-white/10 transition"
+              href="/dashboard"
+              className="border border-white px-8 py-3 min-h-[44px] flex items-center justify-center rounded-xl font-semibold hover:bg-white/10 transition"
             >
-              Explore Community
+              Explore Dashboard
             </Link>
           </div>
         </div>
@@ -332,9 +331,9 @@ export default function HomePage() {
 
         <Link
           href="/auth"
-          className="bg-white text-purple-600 px-10 py-4 rounded-xl font-semibold shadow-lg hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"
+          className="inline-flex items-center justify-center bg-white text-purple-600 px-10 py-4 min-h-[44px] rounded-xl font-semibold shadow-lg hover:shadow-2xl hover:-translate-y-1 transition-all duration-300"
         >
-          Start Your Journey Today
+          View My Personalized Analysis
         </Link>
       </section>
     </div>

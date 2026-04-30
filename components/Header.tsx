@@ -90,7 +90,7 @@ export default function Header() {
 
                 <button
                   onClick={() => setLogOpen(true)}
-                  className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:shadow-md transition"
+                  className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold hover:shadow-md transition"
                 >
                   + Log Symptom
                 </button>
@@ -103,7 +103,7 @@ export default function Header() {
               <div className="relative ml-4" ref={dropdownRef}>
                 <button
                   onClick={() => setDropdownOpen(p => !p)}
-                  className="w-9 h-9 rounded-full bg-gradient-to-r from-purple-600 to-pink-500 text-white flex items-center justify-center font-semibold text-sm"
+                  className="w-[44px] h-[44px] rounded-full bg-gradient-to-r from-purple-600 to-pink-500 text-white flex items-center justify-center font-semibold text-sm"
                 >
                   {userInitial}
                 </button>
@@ -135,7 +135,7 @@ export default function Header() {
                     setAuthMode('login')
                     setAuthOpen(true)
                   }}
-                  className="text-sm text-gray-700 hover:text-purple-600"
+                  className="text-sm text-gray-700 hover:text-purple-600 min-h-[44px] flex items-center px-2"
                 >
                   Sign In
                 </button>
@@ -145,7 +145,7 @@ export default function Header() {
                     setAuthMode('signup')
                     setAuthOpen(true)
                   }}
-                  className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 rounded-lg text-sm font-semibold"
+                  className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold"
                 >
                   Get Started
                 </button>
@@ -155,7 +155,7 @@ export default function Header() {
 
           <button
             onClick={() => setMobileOpen(p => !p)}
-            className="md:hidden"
+            className="md:hidden min-h-[44px] min-w-[44px] flex items-center justify-center"
           >
             {mobileOpen ? <X size={24} /> : <Menu size={24} />}
           </button>
@@ -183,7 +183,7 @@ export default function Header() {
                     </Link>
                     <button
                       onClick={() => { setMobileOpen(false); setLogOpen(true); }}
-                      className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 rounded-lg text-sm font-semibold shadow-sm w-max"
+                      className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold shadow-sm w-max"
                     >
                       + Log Symptom
                     </button>
@@ -197,7 +197,7 @@ export default function Header() {
                     <div className="text-xs text-gray-500 mb-3 truncate">{user?.email}</div>
                     <button
                       onClick={() => { setMobileOpen(false); logout(); }}
-                      className="text-sm font-medium text-red-500 hover:text-red-600"
+                      className="text-sm font-medium text-red-500 hover:text-red-600 min-h-[44px] flex items-center"
                     >
                       Logout
                     </button>
@@ -206,13 +206,13 @@ export default function Header() {
                   <div className="border-t pt-4 mt-2 flex flex-col gap-3">
                     <button
                       onClick={() => { setMobileOpen(false); setAuthMode('login'); setAuthOpen(true); }}
-                      className="text-sm text-left font-medium text-gray-700 hover:text-purple-600"
+                      className="text-sm text-left font-medium text-gray-700 hover:text-purple-600 min-h-[44px] flex items-center"
                     >
                       Sign In
                     </button>
                     <button
                       onClick={() => { setMobileOpen(false); setAuthMode('signup'); setAuthOpen(true); }}
-                      className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 rounded-lg text-sm font-semibold w-max"
+                      className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold w-max"
                     >
                       Get Started
                     </button>
@@ -233,7 +233,7 @@ export default function Header() {
           >
             <button
               onClick={() => setLogOpen(false)}
-              className="absolute top-4 right-4 text-gray-400 hover:text-gray-700"
+              className="absolute top-2 right-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-gray-400 hover:text-gray-700"
             >
               ✕
             </button>
