@@ -1,6 +1,8 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# dependencies
+############################
+# Dependencies (Node)
+############################
 /node_modules
 /.pnp
 .pnp.*
@@ -10,41 +12,80 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
-/coverage
-
-# next.js
-/.next/
-/out/
-
-# production
+############################
+# Next.js & Build
+############################
+.next/
+out/
 /build
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
-.env*
-
-# vercel
 .vercel
-
-# typescript
 *.tsbuildinfo
 next-env.d.ts
 
-# ml_engine
-ml_engine/chroma_db/
-ml_engine/__pycache__/
+############################
+# Environment Variables (STRICT)
+############################
+# Ignore all actual secret files
+.env*
 ml_engine/.env
+
+# Whitelist example templates so others know what keys to set
+!.env.example
+!ml_engine/.env.example
+
+############################
+# Python & Virtual Environments (CRITICAL FIX)
+############################
+# Ignore the massive library folders
+.venv/
+venv/
+env/
+ml_engine/.venv/
+ml_engine/venv/
+
+# Ignore bytecode and cache
+__pycache__/
+ml_engine/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 ml_engine/*.pyc
+
+############################
+# ML Models & Databases
+############################
+# Ignore local vector database (contains user data)
+ml_engine/chroma_db/
+
+# Ignore all model weights by default
 *.pt
+*.pth
+*.onnx
+*.h5
+*.pkl
+*.joblib
+
+# Whitelist ONLY the production base models required to run the app
 !ml_engine/model.pt
 !ml_engine/scalers.pt
+
+############################
+# Logs, Security & OS
+############################
+*.log
+npm-debug.log*
+yarn-debug.log*
+.DS_Store
+Thumbs.db
+*.pem
+*.key
+*.crt
+
+############################
+# IDE & Misc
+############################
+.vscode/
+.idea/
+*.swp
+.cache/
+*.tmp

@@ -132,7 +132,7 @@ export default function AuthModal({
         {/* Close */}
         <button
           onClick={onClose}
-          className="absolute top-4 right-4 text-gray-400 hover:text-gray-700 transition"
+          className="absolute top-2 right-2 min-h-[44px] min-w-[44px] flex items-center justify-center text-gray-400 hover:text-gray-700 transition"
           aria-label="Close modal"
         >
           <X size={20} />
@@ -180,7 +180,7 @@ export default function AuthModal({
           <button
             type="submit"
             disabled={loading}
-            className="w-full bg-gradient-to-r from-purple-600 to-pink-500 text-white py-2 rounded-lg font-semibold hover:shadow-lg transition disabled:opacity-60"
+            className="w-full bg-gradient-to-r from-purple-600 to-pink-500 text-white py-2 min-h-[44px] flex items-center justify-center rounded-lg font-semibold hover:shadow-lg transition disabled:opacity-60"
           >
             {loading
               ? 'Processing...'
@@ -197,7 +197,7 @@ export default function AuthModal({
               Don’t have an account?{' '}
               <button
                 onClick={() => setMode('signup')}
-                className="text-purple-600 font-medium hover:underline"
+                className="text-purple-600 font-medium hover:underline min-h-[44px] px-2"
               >
                 Sign Up
               </button>
@@ -207,7 +207,7 @@ export default function AuthModal({
               Already have an account?{' '}
               <button
                 onClick={() => setMode('login')}
-                className="text-purple-600 font-medium hover:underline"
+                className="text-purple-600 font-medium hover:underline min-h-[44px] px-2"
               >
                 Sign In
               </button>

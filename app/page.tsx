@@ -61,10 +61,10 @@ export default function HomePage() {
               <div className="relative w-28 h-28 md:w-32 md:h-32 rounded-full animate-glow-pulse bg-white/20 backdrop-blur-md border border-white/30 flex items-center justify-center">
                 <div className="animate-gentle-float w-full h-full relative">
                   <Image
-                    src="/images/logo-circle.png"
+                    src="/mimage.jpeg"
                     alt="MenoEaze Logo"
                     fill
-                    className="rounded-full drop-shadow-lg object-cover"
+                    className="rounded-full object-cover"
                     priority
                   />
                 </div>
