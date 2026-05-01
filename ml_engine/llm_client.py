@@ -44,7 +44,7 @@ class LLMClient:
         self.max_tokens = LLM_CFG.max_tokens
 
         if not self.api_key:
-            raise ValueError("Missing GROQ_API_KEY in CONFIG")
+            logger.warning("[LLM] Missing GROQ_API_KEY in CONFIG. LLM will run in degraded/fallback mode.")
 
         self._client = None
 

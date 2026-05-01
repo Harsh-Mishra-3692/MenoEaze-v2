@@ -28,11 +28,19 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # ─────────────────────────────────────────────
 # GLOBAL INIT
 # ─────────────────────────────────────────────
-_model, _model_meta = load_model()
-_model.to(DEVICE)
-_model.eval()
+try:
+    _model, _model_meta = load_model()
+    _model.to(DEVICE)
+    _model.eval()
+except Exception as e:
+    logger.error(f"[Pipeline] Failed to load base model: {e}")
+    _model, _model_meta = None, {}
 
-_llm = LLMClient()
+try:
+    _llm = LLMClient()
+except Exception as e:
+    logger.error(f"[Pipeline] Failed to init LLM client: {e}")
+    _llm = None
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -79,6 +87,10 @@ def predict_pipeline(
         # this forward pass, the local ref keeps the old model alive
         # until this request completes (Python GC won't collect it).
         model_ref = _model
+
+        if model_ref is None:
+            logger.warning("[Pipeline] Model is missing. Returning degraded response.")
+            return {"status": "degraded", "reason": "Model missing", "data": {}}
 
         with torch.no_grad():
             raw_output = model_ref(x).item()
@@ -153,7 +165,7 @@ def predict_pipeline(
         confidence = _compute_confidence(final_pred, bias_data["confidence"])
         latency = (time.time() - start) * 1000
 
-        return {
+        data = {
             "severity": round(final_pred, 4),
             "base_severity": round(base_pred, 4),
             "confidence": round(confidence, 3),
@@ -161,14 +173,11 @@ def predict_pipeline(
             "bias": bias_data,
             "latency_ms": round(latency, 2),
         }
+        return {"status": "success", "reason": "OK", "data": data}
 
     except Exception as e:
         logger.error(f"[Pipeline] Prediction failed: {e}")
-        return {
-            "severity": 0.5,
-            "confidence": 0.0,
-            "error": str(e)
-        }
+        return {"status": "error", "reason": str(e), "data": {}}
 
 
 # ─────────────────────────────────────────────
@@ -228,14 +237,18 @@ def rag_pipeline(
                 "reranker_used": use_reranker
             }
 
-        return result
+        return {"status": "success", "reason": "OK", "data": result}
 
     except Exception as e:
         logger.error(f"[Pipeline] RAG failed: {e}")
         return {
-            "answer": "Unable to generate response at the moment.",
-            "confidence": 0.0,
-            "fallback": True,
+            "status": "error",
+            "reason": str(e),
+            "data": {
+                "answer": "Unable to generate response at the moment.",
+                "confidence": 0.0,
+                "fallback": True,
+            }
         }
 
 
@@ -257,27 +270,42 @@ def full_pipeline(
         severity = 0.5
         pred_out = None
 
+        pred_status = "success"
+        pred_reason = "OK"
+
         if sequence is not None:
-            pred_out = predict_pipeline(user_id, sequence, user_history)
+            pred_res = predict_pipeline(user_id, sequence, user_history)
+            pred_out = pred_res.get("data", {})
+            pred_status = pred_res.get("status", "error")
+            pred_reason = pred_res.get("reason", "")
             severity = pred_out.get("severity", 0.5)
 
-        rag_out = rag_pipeline(
+        rag_res = rag_pipeline(
             query=query,
             severity=severity,
             use_reranker=use_reranker,
             return_debug=return_debug
         )
+        rag_out = rag_res.get("data", {})
+        rag_status = rag_res.get("status", "error")
+        rag_reason = rag_res.get("reason", "")
 
         total_latency = (time.time() - start) * 1000
 
-        return {
+        data = {
             "prediction": pred_out,
             "rag": rag_out,
             "total_latency_ms": round(total_latency, 2),
         }
+        
+        status = "success"
+        reason = "OK"
+        if pred_status != "success" or rag_status != "success":
+            status = "degraded"
+            reason = f"Prediction: {pred_reason} | RAG: {rag_reason}"
+            
+        return {"status": status, "reason": reason, "data": data}
 
     except Exception as e:
         logger.error(f"[Pipeline] Full pipeline failed: {e}")
-        return {
-            "error": str(e)
-        }
+        return {"status": "error", "reason": str(e), "data": {}}

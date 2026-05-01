@@ -40,10 +40,13 @@ _last_failure_time = 0
 # CLIENT INIT
 # ─────────────────────────────────────────────
 def _init_client() -> Optional[Client]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.warning("[DB] SUPABASE_URL or SUPABASE_KEY not configured — DB unavailable")
+        return None
+
     try:
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        client.table("feedback").select("id").limit(1).execute()
-        logger.info("[DB] Connected to Supabase")
+        logger.info("[DB] Supabase client created")
         return client
     except Exception as e:
         logger.error(f"[DB] Init failed: {e}")
@@ -178,13 +181,16 @@ def insert_feedback(record: Dict[str, Any]) -> bool:
 # ─────────────────────────────────────────────
 # BULK INSERT
 # ─────────────────────────────────────────────
-def insert_bulk(table: str, rows: List[Dict[str, Any]]) -> bool:
+def insert_bulk(table: str, rows: List[Dict[str, Any]], upsert: bool = False, on_conflict: str = "") -> bool:
 
     if not rows:
         return True
 
     def op(client):
-        return client.table(table).insert(rows).execute()
+        query = client.table(table)
+        if upsert:
+            return query.upsert(rows, on_conflict=on_conflict).execute() if on_conflict else query.upsert(rows).execute()
+        return query.insert(rows).execute()
 
     return _execute(op) is not None
 
@@ -212,7 +218,8 @@ def fetch_feedback(limit: int = 1000) -> List[Dict[str, Any]]:
 def fetch_table(
     table: str,
     limit: int = 100,
-    filters: Optional[Dict[str, Any]] = None
+    filters: Optional[Dict[str, Any]] = None,
+    order_by: Optional[str] = None
 ) -> List[Dict[str, Any]]:
 
     def op(client):
@@ -221,6 +228,9 @@ def fetch_table(
         if filters:
             for k, v in filters.items():
                 query = query.eq(k, v)
+        
+        if order_by:
+            query = query.order(order_by, desc=True)
 
         return query.execute()
 
@@ -247,7 +257,9 @@ def check_connection() -> bool:
         if not client:
             return False
 
-        client.table("feedback").select("id").limit(1).execute()
+        # Schema-agnostic check: just verify the client can reach Supabase
+        # Use symptom_logs as it's guaranteed to exist in the stable schema
+        client.table("symptom_logs").select("id").limit(1).execute()
         return True
 
     except Exception:

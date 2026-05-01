@@ -147,13 +147,19 @@ def load_config():
             ),
 
             "db": DBConfig(
-                url=_get_env("SUPABASE_URL", required=True),
-                key=_get_env("SUPABASE_KEY", required=True),
+                url=_get_env("SUPABASE_URL", default="", required=False),
+                key=_get_env("SUPABASE_KEY", default="", required=False),
             ),
         }
 
         logger.info(f"[CONFIG] Environment: {config['app'].env}")
         logger.info(f"[CONFIG] Debug mode: {config['app'].debug}")
+
+        # ── ENV VALIDATION WARNINGS ──────────────
+        if not config["db"].url or not config["db"].key:
+            logger.warning("[CONFIG] ⚠️  SUPABASE_URL / SUPABASE_KEY not set — DB operations will be unavailable")
+        if not config["llm"].api_key:
+            logger.warning("[CONFIG] ⚠️  GROQ_API_KEY not set — LLM/RAG responses will use fallbacks")
 
         return config
 

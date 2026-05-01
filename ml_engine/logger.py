@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from contextvars import ContextVar
 
-from config import CONFIG
+from ml_engine.config import CONFIG
 
 # ─────────────────────────────────────────────
 # CONTEXT (for request tracing, user_id, etc.)
