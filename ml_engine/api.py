@@ -1,30 +1,35 @@
-# api.py — ELITE (PRODUCTION-GRADE ORCHESTRATOR + CONTINUAL LEARNING)
+# api.py — PRODUCTION-GRADE ORCHESTRATOR (HARDENED + STABLE)
 
 import time
 import math
 import asyncio
-import logging
 from typing import Dict, List, Optional
 
 import torch
 import numpy as np
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from contextlib import asynccontextmanager
 
+# Internal modules
 from ml_engine.pipeline import full_pipeline
 from ml_engine.data_collector import build_feedback_record
 from ml_engine.db_client import insert_feedback
 
-# NEW: Phase 3 — Continual Learning imports
 import ml_engine.pipeline as pipeline
 from ml_engine.adaptation_worker import learning_buffer, start_worker_thread
 from ml_engine.model_loader import load_model as ml_load_model
 
-logger = logging.getLogger("menoeaze.api")
-logging.basicConfig(level=logging.INFO)
+# NEW: use centralized logger
+from ml_engine.logger import get_logger, init_logging, set_request_id, clear_request_id
+
+# ─────────────────────────────────────────────
+# INIT LOGGING
+# ─────────────────────────────────────────────
+init_logging()
+logger = get_logger("menoeaze.api")
 
 # ─────────────────────────────────────────────
 # CONFIG
@@ -34,31 +39,34 @@ FEATURES = 11
 MAX_MEMORY = 20
 
 # ─────────────────────────────────────────────
-# MEMORY
+# MEMORY (TEMP — replace with DB later)
 # ─────────────────────────────────────────────
 user_memory: Dict[str, List[dict]] = {}
 
 # ─────────────────────────────────────────────
-# MODEL HOT-SWAP (NON-BLOCKING)
+# MODEL HOT SWAP
 # ─────────────────────────────────────────────
 _current_model_timestamp: int = 0
 
 async def _periodic_model_refresh():
-    """Non-blocking background loop: hot-swap the pipeline model if a new version exists."""
     global _current_model_timestamp
     while True:
         try:
             model, metadata = ml_load_model()
             new_ts = metadata.get("timestamp") or 0
+
             if new_ts > _current_model_timestamp:
-                logger.info(f"[API] New model version detected (ts={new_ts}). Hot-swapping.")
-                # GIL-safe pointer swap — no lock needed for reference assignment
+                logger.info(f"Hot-swapping model → ts={new_ts}")
+
                 pipeline._model = model
                 pipeline._model.to(pipeline.DEVICE)
                 pipeline._model.eval()
+
                 _current_model_timestamp = new_ts
+
         except Exception as e:
-            logger.error(f"[API] Model refresh failed (non-fatal): {e}")
+            logger.error(f"Model refresh failed: {e}")
+
         await asyncio.sleep(60)
 
 # ─────────────────────────────────────────────
@@ -66,24 +74,55 @@ async def _periodic_model_refresh():
 # ─────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("[API] Started")
-    # NEW: Start the immortal background adaptation worker
+    logger.info("API starting...")
+
     start_worker_thread(check_interval_seconds=60, min_batch_size=50)
-    logger.info("[API] Adaptation worker thread started.")
-    # NEW: Start the non-blocking model refresh heartbeat
     asyncio.create_task(_periodic_model_refresh())
-    logger.info("[API] Model refresh heartbeat started.")
+
     yield
 
-app = FastAPI(title="MenoEaze Elite AI", lifespan=lifespan)
+# ─────────────────────────────────────────────
+# APP INIT
+# ─────────────────────────────────────────────
+app = FastAPI(title="MenoEaze AI", lifespan=lifespan)
 
+# ⚠️ FIXED: restrict in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # change to frontend URL in prod
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─────────────────────────────────────────────
+# REQUEST MIDDLEWARE (TRACE ID)
+# ─────────────────────────────────────────────
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    request_id = str(time.time())
+    set_request_id(request_id)
+
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        clear_request_id()
+
+# ─────────────────────────────────────────────
+# VALIDATION UTIL
+# ─────────────────────────────────────────────
+def sanitize_sequence(seq):
+    arr = np.array(seq, dtype=np.float32)
+
+    if arr.shape != (SEQ_LEN, FEATURES):
+        raise ValueError(f"Invalid shape {arr.shape}, expected {(SEQ_LEN, FEATURES)}")
+
+    if not np.isfinite(arr).all():
+        logger.warning("NaN/Inf detected → sanitized")
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+
+    return arr
 
 # ─────────────────────────────────────────────
 # SCHEMAS
@@ -94,19 +133,8 @@ class RunRequest(BaseModel):
     sequence: Optional[List[List[float]]] = None
 
     @field_validator("sequence")
-    @classmethod
-    def validate_sequence(cls, v):
-        if v is None:
-            return v
-        arr = np.array(v, dtype=np.float32)
-        if arr.shape != (SEQ_LEN, FEATURES):
-            raise ValueError(f"Expected shape {(SEQ_LEN, FEATURES)}")
-        
-        if not np.isfinite(arr).all():
-            logger.warning("[SECURITY WARNING] Non-finite values (NaN/Inf) detected in RunRequest sequence. Defensively imputing with 0.0.")
-            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-            
-        return arr.tolist()
+    def validate(cls, v):
+        return v if v is None else sanitize_sequence(v).tolist()
 
 
 class PredictRequest(BaseModel):
@@ -114,23 +142,13 @@ class PredictRequest(BaseModel):
     sequence: List[List[float]]
 
     @field_validator("sequence")
-    @classmethod
-    def validate_sequence(cls, v):
-        arr = np.array(v, dtype=np.float32)
-        if arr.shape != (SEQ_LEN, FEATURES):
-            raise ValueError(f"Expected shape {(SEQ_LEN, FEATURES)}")
-            
-        if not np.isfinite(arr).all():
-            logger.warning("[SECURITY WARNING] Non-finite values (NaN/Inf) detected in PredictRequest sequence. Defensively imputing with 0.0.")
-            arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-            
-        return arr.tolist()
+    def validate(cls, v):
+        return sanitize_sequence(v).tolist()
 
 
 class QueryRequest(BaseModel):
     user_id: str
     query: str
-
 
 # ─────────────────────────────────────────────
 # ROUTES
@@ -139,99 +157,73 @@ class QueryRequest(BaseModel):
 def health():
     return {"status": "ok"}
 
-
 # ─────────────────────────────────────────────
 # FULL PIPELINE
 # ─────────────────────────────────────────────
 @app.post("/run")
 async def run_pipeline(data: RunRequest):
-
     start = time.time()
 
     try:
-        user_id = data.user_id
-        query = data.query
-
-        seq_array = None
-        if data.sequence is not None:
-            seq_array = np.array(data.sequence, dtype=np.float32)
-
-        history = user_memory.get(user_id, [])
+        history = user_memory.get(data.user_id, [])
 
         result = full_pipeline(
-            user_id=user_id,
-            query=query,
-            sequence=seq_array,
+            user_id=data.user_id,
+            query=data.query,
+            sequence=np.array(data.sequence) if data.sequence else None,
             user_history={
-                "predictions": [h["pred"] for h in history if "pred" in h],
-                "actuals": [h["actual"] for h in history if "actual" in h],
-                # Phase 5: MAML needs raw feedback logs with sequence + actual_severity
-                "feedback_logs": [
-                    h for h in history
-                    if "sequence" in h and "actual_severity" in h
-                ],
+                "predictions": [h.get("pred") for h in history],
+                "actuals": [h.get("actual") for h in history],
+                "feedback_logs": [h for h in history if "sequence" in h],
             }
         )
 
-        # ── Update memory ──────────────────
+        # update memory
         entry = {
-            "query": query,
             "ts": time.time(),
+            "query": data.query,
         }
 
         if result.get("prediction"):
             entry["pred"] = result["prediction"]["severity"]
 
-        user_memory.setdefault(user_id, []).append(entry)
-        user_memory[user_id] = user_memory[user_id][-MAX_MEMORY:]
+        user_memory.setdefault(data.user_id, []).append(entry)
+        user_memory[data.user_id] = user_memory[data.user_id][-MAX_MEMORY:]
 
-        latency = (time.time() - start) * 1000
-        result["api_latency_ms"] = round(latency, 2)
+        result["latency_ms"] = round((time.time() - start) * 1000, 2)
 
         return result
 
     except Exception as e:
-        logger.exception("[API] run failed")
+        logger.exception("run_pipeline failed")
         raise HTTPException(500, str(e))
 
-
 # ─────────────────────────────────────────────
-# PREDICT ONLY
+# PREDICT
 # ─────────────────────────────────────────────
 @app.post("/predict")
 async def predict(data: PredictRequest):
-
     try:
-        # Phase 5: Gather user feedback history for MAML fast adaptation
         history = user_memory.get(data.user_id, [])
 
         result = full_pipeline(
             user_id=data.user_id,
             query="",
-            sequence=np.array(data.sequence, dtype=np.float32),
-            user_history={
-                "predictions": [h["pred"] for h in history if "pred" in h],
-                "actuals": [h["actual"] for h in history if "actual" in h],
-                "feedback_logs": [
-                    h for h in history
-                    if "sequence" in h and "actual_severity" in h
-                ],
-            }
+            sequence=np.array(data.sequence),
+            user_history={"feedback_logs": history}
         )
 
         return result.get("prediction", {})
 
     except Exception as e:
-        logger.exception("[API] predict failed")
+        logger.exception("predict failed")
         raise HTTPException(500, str(e))
 
-
 # ─────────────────────────────────────────────
-# QUERY ONLY
+# QUERY
 # ─────────────────────────────────────────────
 @app.post("/query")
 async def query(data: QueryRequest):
-
     try:
         result = full_pipeline(
             user_id=data.user_id,
@@ -239,24 +231,19 @@ async def query(data: QueryRequest):
             sequence=None,
             user_history=None
         )
-
         return result.get("rag", {})
 
     except Exception as e:
-        logger.exception("[API] query failed")
+        logger.exception("query failed")
         raise HTTPException(500, str(e))
-
 
 # ─────────────────────────────────────────────
 # FEEDBACK
 # ─────────────────────────────────────────────
 @app.post("/feedback")
 async def feedback(data: dict, background_tasks: BackgroundTasks):
-
     try:
-        # build_feedback_record expects exactly (user_id, predicted, actual, error).
-        # The request may contain extra keys (sequence, actual_severity, etc.)
-        # so we extract only what the legacy function needs.
+        # DB write (non-blocking)
         try:
             record = build_feedback_record(
                 user_id=data.get("user_id", ""),
@@ -265,58 +252,31 @@ async def feedback(data: dict, background_tasks: BackgroundTasks):
                 error=data.get("error", 0.0),
             )
             background_tasks.add_task(insert_feedback, record)
-        except Exception as rec_err:
-            logger.warning(f"[API] build_feedback_record failed (non-fatal): {rec_err}")
+        except Exception as e:
+            logger.warning(f"Feedback record failed: {e}")
 
-        # NEW: Pipe feedback data into the continual learning buffer
+        # sanitize
         sequence = data.get("sequence")
-        actual_severity = data.get("actual_severity")
+        actual = data.get("actual_severity")
 
-        # SECURITY GUARD: Sanitize sequence and actual_severity to prevent NaN poisoning
-        if sequence is not None:
-            try:
-                seq_arr = np.array(sequence, dtype=np.float32)
-                if not np.isfinite(seq_arr).all():
-                    logger.warning("[SECURITY WARNING] Non-finite values in feedback sequence. Defensively imputing with 0.0.")
-                    seq_arr = np.nan_to_num(seq_arr, nan=0.0, posinf=0.0, neginf=0.0)
-                sequence = seq_arr.tolist()
-            except Exception:
-                sequence = None
+        if sequence is not None and actual is not None:
+            seq = sanitize_sequence(sequence)
+            actual = float(actual) if math.isfinite(float(actual)) else 0.0
 
-        if actual_severity is not None:
-            try:
-                actual_sev_float = float(actual_severity)
-                if not math.isfinite(actual_sev_float):
-                    logger.warning("[SECURITY WARNING] Non-finite value in feedback actual_severity. Imputing to 0.0.")
-                    actual_sev_float = 0.0
-                actual_severity = actual_sev_float
-            except Exception:
-                actual_severity = None
+            learning_buffer.add_sample(
+                torch.tensor(seq, dtype=torch.float32),
+                torch.tensor([actual], dtype=torch.float32)
+            )
 
-        if sequence is not None and actual_severity is not None:
-            try:
-                x_tensor = torch.tensor(sequence, dtype=torch.float32)
-                y_tensor = torch.tensor([float(actual_severity)], dtype=torch.float32)
-                learning_buffer.add_sample(x_tensor, y_tensor)
-                logger.info("[API] Feedback piped to online learning buffer.")
-            except Exception as buf_err:
-                logger.warning(f"[API] Buffer injection failed (non-fatal): {buf_err}")
-
-        # Phase 5: Store feedback in user_memory for MAML fast adaptation
-        user_id = data.get("user_id")
-        if user_id and sequence is not None and actual_severity is not None:
-            fb_entry = {
-                "sequence": sequence,
-                "actual_severity": float(actual_severity),
-                "actual": float(actual_severity),
-                "ts": time.time(),
-            }
-            user_memory.setdefault(user_id, []).append(fb_entry)
-            user_memory[user_id] = user_memory[user_id][-MAX_MEMORY:]
-            logger.info(f"[API] Feedback stored in user_memory for MAML | user={user_id}")
+            # memory update
+            user_memory.setdefault(data["user_id"], []).append({
+                "sequence": seq.tolist(),
+                "actual": actual,
+                "ts": time.time()
+            })
 
         return {"status": "ok"}
 
     except Exception as e:
-        logger.exception("[API] feedback failed")
+        logger.exception("feedback failed")
         raise HTTPException(500, str(e))

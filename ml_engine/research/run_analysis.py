@@ -1,11 +1,23 @@
 # ml_engine/research/run_analysis.py
 
+import sys
+import os
+
+# Phase 1: sys.path sanitizer
+# Temporarily remove the local directory to prevent shadowing standard library modules (like 'logging')
+_cwd = os.getcwd()
+if _cwd in sys.path:
+    sys.path.remove(_cwd)
+
 import numpy as np
 import time
 
 from ml_engine.pipeline import full_pipeline
 from ml_engine.research.semantic_metrics import semantic_similarity
 from ml_engine.research.llm_judge import evaluate_answer
+
+# Restore path
+sys.path.insert(0, _cwd)
 
 
 # ─────────────────────────────────────────────
