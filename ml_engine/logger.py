@@ -164,6 +164,10 @@ def end_request():
     trace_id_ctx.set(None)
 
 
+def set_request_id(req_id: str):
+    request_id_ctx.set(req_id)
+
+
 # ─────────────────────────────────────────────
 # STRUCTURED LOGGING
 # ─────────────────────────────────────────────

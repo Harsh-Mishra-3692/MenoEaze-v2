@@ -258,3 +258,94 @@ def call_rpc(func: str, params: Dict = None) -> List[Dict]:
 
     except Exception:
         return []
+
+
+# ─────────────────────────────────────────────
+# DOMAIN SPECIFIC METHODS
+# ─────────────────────────────────────────────
+def insert_symptom_log(user_id: str, feature_vector: List[float], raw_text: str, emoji: str) -> bool:
+    if not _valid_user(user_id): return False
+    vec = _safe_vec(feature_vector)
+    if not vec: return False
+    payload = {
+        "user_id": user_id,
+        "feature_vector": vec,
+        "raw_text": _safe_str(raw_text),
+        "emoji": _safe_str(emoji, 10)
+    }
+    client = get_client()
+    if not client: return False
+    res = _execute(lambda: client.table("symptom_logs").insert(payload).execute(), "insert_symptom_log")
+    return bool(res and getattr(res, "data", None))
+
+def fetch_recent_logs(user_id: str) -> Optional[List[Dict]]:
+    if not _valid_user(user_id): return []
+    client = get_client()
+    if not client: return None
+    res = _execute(
+        lambda: client.table("symptom_logs").select("*").eq("user_id", user_id).order("created_at", desc=True).limit(10).execute(),
+        "fetch_recent_logs"
+    )
+    if res is None:
+        return None
+    if hasattr(res, "data"):
+        return list(reversed(res.data or []))
+    return []
+
+def insert_prediction(user_id: str, severity: float, confidence: float, reasoning: str) -> Optional[str]:
+    if not _valid_user(user_id): return None
+    payload = {
+        "user_id": user_id,
+        "severity": _safe_float(severity),
+        "confidence": _safe_float(confidence),
+        "reasoning": _safe_str(reasoning, 1000)
+    }
+    client = get_client()
+    if not client: return None
+    res = _execute(lambda: client.table("predictions").insert(payload).execute(), "insert_prediction")
+    if res and getattr(res, "data", None) and len(res.data) > 0:
+        return res.data[0].get("id")
+    return None
+
+def fetch_prediction_history(user_id: str) -> List[Dict]:
+    return fetch_table("predictions", {"user_id": user_id}, limit=50)
+
+def insert_feedback(user_id: str, prediction_id: str, predicted: float, actual: float, rating: int, trust_score: float) -> bool:
+    if not _valid_user(user_id): return False
+    payload = {
+        "user_id": user_id,
+        "prediction_id": _safe_str(prediction_id, 50),
+        "predicted": _safe_float(predicted),
+        "actual": _safe_float(actual),
+        "rating": max(1, min(10, int(rating))),
+        "trust_score": _safe_float(trust_score)
+    }
+    client = get_client()
+    if not client: return False
+    res = _execute(lambda: client.table("feedback").insert(payload).execute(), "insert_feedback")
+    return bool(res and getattr(res, "data", None))
+
+def fetch_feedback_history(user_id: str) -> List[Dict]:
+    return fetch_table("feedback", {"user_id": user_id}, limit=50)
+
+def insert_guardrail_log(user_id: str, **kwargs) -> bool:
+    if not _valid_user(user_id): return False
+    payload = {"user_id": user_id}
+    for k, v in kwargs.items():
+        payload[_safe_str(k, 50)] = _safe_str(v, 500)
+    client = get_client()
+    if not client: return False
+    res = _execute(lambda: client.table("guardrail_logs").insert(payload).execute(), "insert_guardrail_log")
+    return bool(res and getattr(res, "data", None))
+
+def get_user_weights(user_id: str) -> Optional[Dict]:
+    if not _valid_user(user_id): return None
+    client = get_client()
+    if not client: return None
+    res = _execute(
+        lambda: client.table("user_weights").select("*").eq("user_id", user_id).limit(1).execute(),
+        "get_user_weights"
+    )
+    if res and hasattr(res, "data") and res.data:
+        return res.data[0].get("weights")
+    return None

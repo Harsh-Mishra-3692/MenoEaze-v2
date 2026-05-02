@@ -93,6 +93,9 @@ def _fallback_answer(level):
 # ─────────────────────────────────────────────
 def predict(sequence, user_id):
 
+    if sequence is None:
+        return _default_pred()
+
     seq = _validate_sequence(sequence)
 
     if seq is None or _adapter is None:
