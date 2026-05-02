@@ -1,187 +1,274 @@
-# user_store.py — ELITE (CLEAN + CONSISTENT + SAFE DATA LAYER)
+# user_store.py — FINAL ELITE v2 (TEMPORAL-ALIGNED + SIGNAL-AWARE)
 
 import logging
-from datetime import datetime, timedelta, timezone # DEPRECATED: memory logic is now fully DB-based via Supabase.
-from typing import Optional, List, Dict, Any, Tuple
+from typing import List, Dict, Tuple
+from datetime import datetime
 
 import numpy as np
 
-from ml_engine.db_client import fetch_table, insert_feedback
+from ml_engine.db_client import (
+    fetch_prediction_history,
+    fetch_feedback_history,
+    fetch_recent_logs
+)
 
 logger = logging.getLogger("menoeaze.user_store")
 
-SEQ_SHAPE = (5, 11)
+SEQ_LEN = 5
+FEATURES = 11
+MAX_SAMPLES = 50
+MIN_TRUST = 0.3
+OUTLIER_THRESHOLD = 0.8
+MAX_TIME_DIFF_SEC = 3600
+
+EPS = 1e-6
 
 
 # ─────────────────────────────────────────────
-# VALIDATION
+# SAFE HELPERS
 # ─────────────────────────────────────────────
-def _validate_sequence(seq) -> Optional[np.ndarray]:
+def _safe_float(x, default=0.0):
     try:
-        arr = np.array(seq, dtype=np.float32)
-        if arr.shape == SEQ_SHAPE:
-            return arr
-    except Exception:
-        pass
-    return None
+        x = float(x)
+        return x if np.isfinite(x) else default
+    except:
+        return default
+
+
+def _clamp(x, a=0.0, b=1.0):
+    return max(a, min(b, x))
+
+
+def _parse_ts(ts):
+    try:
+        if isinstance(ts, (int, float)):
+            return float(ts)
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except:
+        return None
+
+
+def _valid_vector(vec):
+    return (
+        isinstance(vec, list)
+        and len(vec) == FEATURES
+        and all(isinstance(v, (int, float)) for v in vec)
+    )
+
+
+def _valid_sequence(seq: np.ndarray) -> bool:
+    if not isinstance(seq, np.ndarray):
+        return False
+    if seq.shape != (SEQ_LEN, FEATURES):
+        return False
+    if not np.isfinite(seq).all():
+        return False
+    if np.mean(seq) == 0:  # all padding
+        return False
+    return True
 
 
 # ─────────────────────────────────────────────
-# USER HISTORY
+# BUILD SEQUENCES
 # ─────────────────────────────────────────────
-def get_user_history(
-    user_id: str,
-    days: int = 30,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], List[float], List[float]]:
+def _build_sequences(logs: List[Dict]):
+
+    cleaned = []
+
+    for l in logs:
+        vec = l.get("feature_vector")
+        ts = _parse_ts(l.get("created_at"))
+
+        if not _valid_vector(vec) or ts is None:
+            continue
+
+        arr = np.array(vec, dtype=np.float32)
+
+        if not np.isfinite(arr).all():
+            continue
+
+        cleaned.append((ts, arr))
+
+    if not cleaned:
+        return []
+
+    cleaned.sort(key=lambda x: x[0])
+
+    sequences = []
+
+    for i in range(len(cleaned)):
+        start = max(0, i - SEQ_LEN + 1)
+        seq = [v for _, v in cleaned[start:i + 1]]
+
+        if len(seq) < SEQ_LEN:
+            pad = [np.zeros(FEATURES, dtype=np.float32)] * (SEQ_LEN - len(seq))
+            seq = pad + seq
+
+        seq = np.stack(seq)
+
+        if _valid_sequence(seq):
+            sequences.append((cleaned[i][0], seq))  # attach timestamp
+
+    return sequences
+
+
+# ─────────────────────────────────────────────
+# ALIGN FEEDBACK (TIME-AWARE)
+# ─────────────────────────────────────────────
+def _align_feedback(preds, feedback):
+
+    pred_map = []
+
+    for p in preds:
+        ts = _parse_ts(p.get("created_at"))
+        if ts is None:
+            continue
+
+        pred_map.append({
+            "id": p.get("id"),
+            "severity": _safe_float(p.get("severity")),
+            "ts": ts
+        })
+
+    aligned = []
+
+    for fb in feedback:
+
+        trust = _safe_float(fb.get("trust_score"))
+        if trust < MIN_TRUST:
+            continue
+
+        actual = _safe_float(fb.get("actual"))
+        if not (0 <= actual <= 1):
+            continue
+
+        fb_ts = _parse_ts(fb.get("created_at"))
+        if fb_ts is None:
+            continue
+
+        # ── find closest prediction
+        best = None
+        best_diff = float("inf")
+
+        for p in pred_map:
+            diff = abs(p["ts"] - fb_ts)
+            if diff < best_diff:
+                best_diff = diff
+                best = p
+
+        if not best or best_diff > MAX_TIME_DIFF_SEC:
+            continue
+
+        error = abs(best["severity"] - actual)
+
+        if error > OUTLIER_THRESHOLD:
+            continue
+
+        aligned.append({
+            "pred": best["severity"],
+            "actual": actual,
+            "error": error,
+            "ts": best["ts"],
+            "weight": trust
+        })
+
+    if not aligned:
+        return []
+
+    # normalize weights
+    weights = np.array([a["weight"] for a in aligned])
+    weights = weights / (np.sum(weights) + EPS)
+
+    for i, a in enumerate(aligned):
+        a["weight"] = float(weights[i])
+
+    return aligned
+
+
+# ─────────────────────────────────────────────
+# MAIN HISTORY
+# ─────────────────────────────────────────────
+def get_user_history(user_id: str):
 
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        preds = fetch_prediction_history(user_id, limit=MAX_SAMPLES) or []
+        feedback = fetch_feedback_history(user_id, limit=MAX_SAMPLES) or []
+        logs = fetch_recent_logs(user_id, limit=MAX_SAMPLES) or []
 
-        # ── Fetch predictions ───────────────
-        preds = fetch_table(
-            table="prediction_history",
-            limit=1000,
-            filters={"user_id": user_id}
-        )
+        sequences = _build_sequences(logs)
+        aligned = _align_feedback(preds, feedback)
 
-        # ── Fetch feedback ──────────────────
-        feedback = fetch_table(
-            table="user_feedback",
-            limit=1000,
-            filters={"user_id": user_id}
-        )
-
-        if not preds:
+        if not sequences or len(aligned) < 2:
             return None, None, [], []
 
-        sequences = []
-        pred_values = []
+        X, y = [], []
+        pred_vals, actual_vals = [], []
 
-        for row in preds:
-            if "created_at" in row and row["created_at"] < cutoff:
+        for item in aligned:
+
+            # ── find closest sequence in time
+            best_seq = None
+            best_diff = float("inf")
+
+            for ts, seq in sequences:
+                diff = abs(ts - item["ts"])
+                if diff < best_diff:
+                    best_diff = diff
+                    best_seq = seq
+
+            if best_seq is None:
                 continue
 
-            seq = _validate_sequence(row.get("input_sequence"))
-            if seq is not None:
-                sequences.append(seq)
-                pred_values.append(float(row.get("predicted_severity", 0.5)))
+            X.append(best_seq)
+            y.append(item["actual"])
 
-        if not sequences:
-            return None, None, pred_values, []
+            pred_vals.append(item["pred"])
+            actual_vals.append(item["actual"])
 
-        # ── Map feedback ────────────────────
-        feedback_map = {
-            f["prediction_id"]: f["actual_severity"]
-            for f in feedback if "prediction_id" in f
-        }
+        if not X:
+            return None, None, [], []
 
-        actual_values = []
-        aligned_actuals = []
-
-        for row in preds:
-            pid = row.get("id")
-            if pid in feedback_map:
-                actual_values.append(feedback_map[pid])
-
-        # Align targets
-        if actual_values and len(actual_values) >= len(sequences):
-            aligned_actuals = actual_values[: len(sequences)]
-        else:
-            aligned_actuals = pred_values  # fallback
-
-        history_x = np.array(sequences, dtype=np.float32)
-        history_y = np.array(aligned_actuals, dtype=np.float32)
-
-        return history_x, history_y, pred_values, actual_values
+        return (
+            np.array(X, dtype=np.float32),
+            np.array(y, dtype=np.float32),
+            pred_vals,
+            actual_vals
+        )
 
     except Exception as e:
-        logger.error(f"[UserStore] history fetch failed: {e}")
+        logger.error(f"[UserStore] history failed: {e}")
         return None, None, [], []
 
 
 # ─────────────────────────────────────────────
-# STORE PREDICTION
+# USER RELIABILITY (UPGRADED)
 # ─────────────────────────────────────────────
-def store_prediction(
-    user_id: str,
-    input_sequence: list,
-    predicted_severity: float,
-    adapted: bool = False,
-) -> Optional[str]:
+def compute_user_reliability(user_id: str):
 
     try:
-        seq = _validate_sequence(input_sequence)
-        if seq is None:
-            logger.error("[UserStore] invalid sequence")
-            return None
+        feedback = fetch_feedback_history(user_id, limit=20) or []
 
-        record = {
-            "user_id": user_id,
-            "input_sequence": seq.tolist(),
-            "predicted_severity": round(predicted_severity, 4),
-            "adapted": adapted,
-        }
+        if not feedback:
+            return 0.0
 
-        # Use db_client bulk insert pattern
-        success = insert_feedback(record)  # reuse safe layer
+        scores = [
+            _safe_float(fb.get("trust_score"))
+            for fb in feedback
+            if fb.get("trust_score") is not None
+        ]
 
-        return "ok" if success else None
+        if not scores:
+            return 0.0
 
-    except Exception as e:
-        logger.error(f"[UserStore] store prediction failed: {e}")
-        return None
+        mean = np.mean(scores)
+        variance = np.var(scores)
 
+        stability = np.exp(-variance * 5)
 
-# ─────────────────────────────────────────────
-# STORE FEEDBACK
-# ─────────────────────────────────────────────
-def store_feedback(
-    user_id: str,
-    prediction_id: str,
-    actual_severity: float,
-) -> bool:
+        # signal strength factor
+        strength = min(1.0, len(scores) / 20)
 
-    try:
-        record = {
-            "user_id": user_id,
-            "prediction_id": prediction_id,
-            "actual": round(actual_severity, 4),
-        }
+        return float(_clamp(mean * stability * strength))
 
-        return insert_feedback(record)
-
-    except Exception as e:
-        logger.error(f"[UserStore] feedback failed: {e}")
-        return False
-
-
-# ─────────────────────────────────────────────
-# AGGREGATED FEEDBACK (TRAINING)
-# ─────────────────────────────────────────────
-def get_aggregated_feedback(days: int = 90) -> List[Dict[str, Any]]:
-
-    try:
-        feedback = fetch_table("user_feedback", limit=5000)
-        preds = fetch_table("prediction_history", limit=5000)
-
-        pred_map = {p["id"]: p.get("input_sequence") for p in preds}
-
-        results = []
-
-        for fb in feedback:
-            pid = fb.get("prediction_id")
-
-            if pid in pred_map:
-                seq = _validate_sequence(pred_map[pid])
-
-                if seq is not None:
-                    results.append({
-                        "input_sequence": seq.tolist(),
-                        "actual_severity": fb.get("actual_severity"),
-                    })
-
-        return results
-
-    except Exception as e:
-        logger.error(f"[UserStore] aggregation failed: {e}")
-        return []
+    except Exception:
+        return 0.0

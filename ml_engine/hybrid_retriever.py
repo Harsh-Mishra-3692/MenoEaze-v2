@@ -1,4 +1,4 @@
-# hybrid_retriever.py — ELITE v5 (PERSONALIZED + TRUE HYBRID)
+# hybrid_retriever.py — FINAL ELITE (CLINICAL + ROBUST + PRIORITY-AWARE)
 
 import logging
 import re
@@ -8,20 +8,27 @@ from typing import List, Dict, Any, Optional
 from ml_engine.hf_embedder import HFEmbedder
 from ml_engine.db_client import call_rpc, fetch_table
 
-from ml_engine.research.bm25_index import BM25Index
-from ml_engine.research.fusion import hybrid_fusion
+try:
+    from ml_engine.research.bm25_index import BM25Index
+except:
+    BM25Index = None
+
+try:
+    from ml_engine.research.fusion import hybrid_fusion
+except:
+    hybrid_fusion = None
 
 logger = logging.getLogger("menoeaze.hybrid")
 
 # ─────────────────────────────────────────────
-# CONFIG (NOW FLEXIBLE)
+# CONFIG
 # ─────────────────────────────────────────────
-DEFAULT_VECTOR_K = 8
-DEFAULT_BM25_K = 8
-DEFAULT_FINAL_K = 8
+DEFAULT_K = 8
+MAX_DOC_LENGTH = 1000
 
-PERSONALIZATION_WEIGHT = 0.2
-MIN_SCORE_THRESHOLD = 0.05
+PERSONALIZATION_WEIGHT = 0.15
+PRIORITY_BOOST = 0.25
+MIN_SCORE = 0.05
 
 _embedder = None
 _bm25 = None
@@ -33,164 +40,183 @@ _bm25 = None
 def _get_embedder():
     global _embedder
     if _embedder is None:
-        _embedder = HFEmbedder()
+        try:
+            _embedder = HFEmbedder()
+        except Exception:
+            _embedder = None
     return _embedder
 
 
 def _get_bm25():
     global _bm25
 
-    if _bm25 is not None:
+    if BM25Index is None:
+        return None
+
+    if _bm25:
         return _bm25
 
     try:
-        docs = fetch_table("medical_documents", limit=500)
-
-        if not docs:
-            return None
-
+        docs = fetch_table("medical_documents", limit=1000)
         bm25 = BM25Index()
         bm25.build(docs)
         _bm25 = bm25
-
-        logger.info(f"[Hybrid] BM25 initialized | docs={len(docs)}")
-
-    except Exception as e:
-        logger.error(f"[Hybrid] BM25 init failed: {e}")
+    except:
         _bm25 = None
 
     return _bm25
 
 
 # ─────────────────────────────────────────────
-# USER CONTEXT (NEW)
+# CLEAN
 # ─────────────────────────────────────────────
-def _get_user_context(user_id: str) -> str:
-    """
-    Pull past user info (chat/symptoms/preferences)
-    """
+def _clean(text: str):
     try:
-        rows = fetch_table("user_memory", filters={"user_id": user_id}, limit=20)
-
-        texts = [
-            r.get("content", "")
-            for r in rows if r.get("content")
-        ]
-
-        return " ".join(texts)[:500]
-
-    except Exception:
+        return re.sub(r"\s+", " ", text.lower()).strip()[:300]
+    except:
         return ""
 
 
-def _expand_query(query: str, user_context: str) -> str:
-    if not user_context:
-        return query
-
-    return f"{query} {user_context}"
-
-
 # ─────────────────────────────────────────────
-# TEXT CLEANING
+# NORMALIZATION
 # ─────────────────────────────────────────────
-def _clean(text: str) -> str:
-    text = text.lower()
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()[:300]
+def _normalize_scores(docs, key):
+    vals = [d.get(key, 0.0) for d in docs]
+    if not vals:
+        return docs
 
+    mn, mx = min(vals), max(vals)
+    if mx - mn < 1e-6:
+        return docs
 
-def _tokenize(text: str):
-    return re.sub(r"[^a-z0-9\s]", " ", text.lower()).split()
+    for d in docs:
+        d[key] = (d.get(key, 0.0) - mn) / (mx - mn)
 
-
-# ─────────────────────────────────────────────
-# PERSONALIZATION SCORE (NEW)
-# ─────────────────────────────────────────────
-def _personalization_score(doc: Dict, user_context: str) -> float:
-    if not user_context:
-        return 0.0
-
-    doc_tokens = set(_tokenize(doc.get("content", "")))
-    user_tokens = set(_tokenize(user_context))
-
-    if not doc_tokens or not user_tokens:
-        return 0.0
-
-    overlap = len(doc_tokens & user_tokens)
-    return overlap / len(user_tokens)
+    return docs
 
 
 # ─────────────────────────────────────────────
 # VECTOR SEARCH
 # ─────────────────────────────────────────────
-def _vector_search(query: str, k: int) -> List[Dict[str, Any]]:
+def _vector_search(query, k):
+    embedder = _get_embedder()
+    if embedder is None:
+        return []
+
     try:
-        embedder = _get_embedder()
         vec = embedder.embed([query])[0]
 
-        res = call_rpc(
+        if not vec.any():
+            return []
+
+        return call_rpc(
             "match_medical_documents",
             {
-                "match_count": k,
                 "query_embedding": vec.tolist(),
+                "match_count": k,
             }
-        )
-
-        return res or []
+        ) or []
 
     except Exception as e:
-        logger.error(f"[Hybrid] Vector search failed: {e}")
+        logger.error(f"[Hybrid] vector failed: {e}")
         return []
 
 
 # ─────────────────────────────────────────────
 # BM25 SEARCH
 # ─────────────────────────────────────────────
-def _bm25_search(query: str, k: int) -> List[Dict[str, Any]]:
+def _bm25_search(query, k):
     bm25 = _get_bm25()
-
-    if bm25 is None:
+    if not bm25:
         return []
 
     try:
-        return bm25.search(query, top_k=k)
-    except Exception as e:
-        logger.error(f"[Hybrid] BM25 failed: {e}")
+        return bm25.search(query, top_k=k) or []
+    except:
         return []
 
 
 # ─────────────────────────────────────────────
-# PERSONALIZATION RE-RANK (NEW)
+# SAFE FUSION
 # ─────────────────────────────────────────────
-def _apply_personalization(docs: List[Dict], user_context: str):
+def _fuse(vector_docs, keyword_docs, k):
+
+    if hybrid_fusion:
+        try:
+            return hybrid_fusion(vector_docs, keyword_docs, top_k=k)
+        except:
+            pass
+
+    # fallback: simple merge
+    combined = {d["id"]: d for d in vector_docs}
+    for d in keyword_docs:
+        if d["id"] not in combined:
+            combined[d["id"]] = d
+
+    return list(combined.values())[:k]
+
+
+# ─────────────────────────────────────────────
+# PRIORITY BOOST (CLINICAL BOOKS)
+# ─────────────────────────────────────────────
+def _apply_priority(docs):
     for d in docs:
-        p_score = _personalization_score(d, user_context)
-        base = d.get("fusion_score", d.get("similarity", 0.0))
+        base = d.get("similarity", 0.0)
+        priority = d.get("priority", 0.0)
+        d["score"] = base + (priority * PRIORITY_BOOST)
+    return docs
 
-        d["personalization_score"] = p_score
-        d["final_score"] = (
-            (1 - PERSONALIZATION_WEIGHT) * base +
-            PERSONALIZATION_WEIGHT * p_score
-        )
 
-    docs.sort(key=lambda x: x["final_score"], reverse=True)
+# ─────────────────────────────────────────────
+# PERSONALIZATION
+# ─────────────────────────────────────────────
+def _apply_personalization(docs, context):
+
+    if not context:
+        return docs
+
+    ctx_tokens = set(context.split())
+
+    for d in docs:
+        text = d.get("content", "")
+        tokens = set(text.split())
+
+        overlap = len(tokens & ctx_tokens) / max(len(ctx_tokens), 1)
+
+        d["score"] += overlap * PERSONALIZATION_WEIGHT
 
     return docs
 
 
 # ─────────────────────────────────────────────
-# MAIN PIPELINE
+# DIVERSITY FILTER
+# ─────────────────────────────────────────────
+def _deduplicate(docs):
+    seen = set()
+    unique = []
+
+    for d in docs:
+        key = (d.get("document_name"), d.get("content")[:100])
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(d)
+
+    return unique
+
+
+# ─────────────────────────────────────────────
+# MAIN
 # ─────────────────────────────────────────────
 def hybrid_retrieve(
     query: str,
     user_id: Optional[str] = None,
-    vector_k: int = DEFAULT_VECTOR_K,
-    bm25_k: int = DEFAULT_BM25_K,
-    final_k: int = DEFAULT_FINAL_K,
-    return_debug: bool = False
-) -> List[Dict[str, Any]]:
+    final_k: int = DEFAULT_K
+):
 
-    if not query or not query.strip():
+    if not query:
         return []
 
     start = time.time()
@@ -198,110 +224,61 @@ def hybrid_retrieve(
     try:
         query = _clean(query)
 
-        # ── PERSONALIZATION
-        user_context = _get_user_context(user_id) if user_id else ""
-        expanded_query = _expand_query(query, user_context)
+        context = ""
+        if user_id:
+            rows = fetch_table("user_memory", filters={"user_id": user_id}, limit=10)
+            context = " ".join(r.get("content", "") for r in rows)
 
-        # ── RETRIEVAL
-        vector_docs = _vector_search(expanded_query, vector_k)
-        keyword_docs = _bm25_search(expanded_query, bm25_k)
+        expanded = f"{query} {context}"[:500]
 
-        # ── FUSION
-        fused_docs = hybrid_fusion(
-            vector_docs,
-            keyword_docs,
-            method="weighted",
-            top_k=final_k
-        )
+        vector_docs = _vector_search(expanded, final_k)
+        keyword_docs = _bm25_search(expanded, final_k)
 
-        # ── PERSONALIZATION RE-RANK
-        fused_docs = _apply_personalization(fused_docs, user_context)
+        docs = _fuse(vector_docs, keyword_docs, final_k)
 
-        # ── FILTER
-        fused_docs = [
-            d for d in fused_docs
-            if d.get("final_score", 0) >= MIN_SCORE_THRESHOLD
-        ][:final_k]
+        docs = _normalize_scores(docs, "similarity")
+        docs = _apply_priority(docs)
+        docs = _apply_personalization(docs, context)
+
+        docs.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        docs = _deduplicate(docs)
+
+        results = []
+        for d in docs[:final_k]:
+
+            content = d.get("content", "")
+            if not content:
+                continue
+
+            results.append({
+                "content": content[:MAX_DOC_LENGTH],
+                "source": d.get("document_name"),
+                "score": round(d.get("score", 0), 4),
+                "priority": d.get("priority", 0),
+            })
 
         latency = (time.time() - start) * 1000
 
-        logger.info(
-            f"[Hybrid] final={len(fused_docs)} | "
-            f"user={bool(user_id)} | latency={latency:.2f}ms"
-        )
+        logger.info(f"[Hybrid] {len(results)} docs | {latency:.1f}ms")
 
-        if return_debug:
-            return {
-                "results": fused_docs,
-                "vector_docs": vector_docs,
-                "bm25_docs": keyword_docs,
-                "user_context_used": bool(user_context),
-                "latency_ms": round(latency, 2),
-            }
-
-        return fused_docs
+        return results
 
     except Exception as e:
-        logger.error(f"[Hybrid] pipeline failed: {e}")
+        logger.error(f"[Hybrid] failed: {e}")
         return []
 
 
 # ─────────────────────────────────────────────
-# STATE-CONDITIONED ADAPTIVE RETRIEVAL (Phase 4)
+# ADAPTIVE
 # ─────────────────────────────────────────────
-# Severity-tier config: (top_k, query emphasis keywords)
-_SEVERITY_TIERS = {
-    "low":    (3, "lifestyle diet preventative wellness sleep hygiene"),
-    "medium": (5, "symptom management lifestyle adjustments medical advice"),
-    "high":   (7, "clinical intervention medical treatment urgent care severe symptoms"),
-}
+def adaptive_retrieve(query: str, severity: float, user_id=None):
 
-
-def adaptive_retrieve(
-    query: str,
-    severity: float,
-    user_id: Optional[str] = None,
-    return_debug: bool = False
-) -> List[Dict[str, Any]]:
-    """
-    Severity-conditioned retrieval: dynamically adjusts top-K and
-    query emphasis based on the predicted severity.
-
-    LOW  (< 0.4): k=3, prioritize lifestyle/diet/preventative
-    MED  (0.4-0.7): k=5, balanced symptom-management + lifestyle
-    HIGH (> 0.7): k=7, prioritize clinical/urgent care
-
-    Falls back gracefully to empty list on any failure.
-    """
-    if not query or not query.strip():
-        return []
-
-    # Determine tier
     if severity < 0.4:
-        tier = "low"
+        k = 3
     elif severity < 0.7:
-        tier = "medium"
+        k = 5
     else:
-        tier = "high"
+        k = 8
 
-    k, emphasis = _SEVERITY_TIERS[tier]
-
-    # Expand query with severity-specific emphasis
-    adjusted_query = f"{query} {emphasis}"
-
-    try:
-        docs = hybrid_retrieve(
-            query=adjusted_query,
-            user_id=user_id,
-            vector_k=k,
-            bm25_k=k,
-            final_k=k,
-            return_debug=return_debug,
-        )
-
-        logger.info(f"[Hybrid] adaptive_retrieve | tier={tier} k={k} docs={len(docs) if isinstance(docs, list) else '?'}")
-        return docs
-
-    except Exception as e:
-        logger.error(f"[Hybrid] adaptive_retrieve failed: {e}. Graceful degradation.")
-        return []
+    return hybrid_retrieve(query, user_id, final_k=k)

@@ -1,295 +1,260 @@
-# db_client.py — ELITE (PRODUCTION + SAFE + CENTRALIZED CONFIG)
+# db_client.py — FINAL ELITE v2 (RESILIENT + IDEMPOTENT + SAFE)
 
-import time
 import logging
+import time
+import hashlib
 import threading
 from typing import Dict, List, Any, Optional, Callable
 
 from supabase import create_client, Client
-
-# ✅ CENTRAL CONFIG
 from ml_engine.config import CONFIG
 
 logger = logging.getLogger("menoeaze.db")
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
 SUPABASE_URL = CONFIG["db"].url
 SUPABASE_KEY = CONFIG["db"].key
 
+_client: Optional[Client] = None
+_client_lock = threading.Lock()
+
 MAX_RETRIES = 3
-BASE_DELAY = 0.5
-MAX_DELAY = 3.0
-TIMEOUT = 5.0
+BACKOFF_BASE = 0.3
+TIMEOUT_WARN_MS = 500
 
-CIRCUIT_BREAKER_THRESHOLD = 5
-CIRCUIT_BREAKER_RESET = 30
+FEATURES = 11
+MAX_PAYLOAD_SIZE = 1000  # safety
 
-# ─────────────────────────────────────────────
-# GLOBAL STATE
-# ─────────────────────────────────────────────
-_supabase: Optional[Client] = None
-_lock = threading.Lock()
-
-_failure_count = 0
-_last_failure_time = 0
+# circuit breaker
+_FAILURE_COUNT = 0
+_FAILURE_LIMIT = 5
+_CIRCUIT_OPEN = False
+_CIRCUIT_RESET_TIME = 10
+_LAST_FAILURE_TIME = 0
 
 
 # ─────────────────────────────────────────────
-# CLIENT INIT
+# SAFE HELPERS
 # ─────────────────────────────────────────────
-def _init_client() -> Optional[Client]:
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.warning("[DB] SUPABASE_URL or SUPABASE_KEY not configured — DB unavailable")
-        return None
-
+def _safe_str(v, max_len=255):
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        logger.info("[DB] Supabase client created")
-        return client
-    except Exception as e:
-        logger.error(f"[DB] Init failed: {e}")
+        return str(v).strip()[:max_len]
+    except:
+        return ""
+
+
+def _safe_float(v, a=0.0, b=1.0):
+    try:
+        x = float(v)
+        return max(a, min(b, x))
+    except:
+        return a
+
+
+def _safe_vec(v):
+    if not isinstance(v, list) or len(v) != FEATURES:
+        return None
+    try:
+        return [float(x) for x in v]
+    except:
         return None
 
 
-def _get_client() -> Optional[Client]:
-    global _supabase
+def _valid_user(user_id: str):
+    return isinstance(user_id, str) and 5 < len(user_id) < 128
 
-    if _supabase:
-        return _supabase
 
-    with _lock:
-        if not _supabase:
-            _supabase = _init_client()
+def _hash_payload(payload: Dict):
+    return hashlib.md5(str(payload).encode()).hexdigest()
 
-    return _supabase
+
+def _validate_identifier(name: str):
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name.replace("_", "").isalnum():
+        return None
+    return name
 
 
 # ─────────────────────────────────────────────
-# CIRCUIT BREAKER (THREAD-SAFE)
+# CIRCUIT BREAKER
 # ─────────────────────────────────────────────
-def _circuit_open() -> bool:
-    global _failure_count, _last_failure_time
+def _check_circuit():
+    global _CIRCUIT_OPEN, _LAST_FAILURE_TIME
 
-    with _lock:
-        if _failure_count < CIRCUIT_BREAKER_THRESHOLD:
-            return False
-
-        if time.time() - _last_failure_time > CIRCUIT_BREAKER_RESET:
-            _failure_count = 0
-            return False
-
+    if not _CIRCUIT_OPEN:
         return True
+
+    if time.time() - _LAST_FAILURE_TIME > _CIRCUIT_RESET_TIME:
+        _CIRCUIT_OPEN = False
+        return True
+
+    return False
 
 
 def _record_failure():
-    global _failure_count, _last_failure_time
-    with _lock:
-        _failure_count += 1
-        _last_failure_time = time.time()
+    global _FAILURE_COUNT, _CIRCUIT_OPEN, _LAST_FAILURE_TIME
 
+    _FAILURE_COUNT += 1
+    _LAST_FAILURE_TIME = time.time()
 
-def _record_success():
-    global _failure_count
-    with _lock:
-        _failure_count = 0
+    if _FAILURE_COUNT >= _FAILURE_LIMIT:
+        _CIRCUIT_OPEN = True
+        logger.error("[DB] Circuit breaker OPEN")
 
 
 # ─────────────────────────────────────────────
-# RETRY + TIMEOUT
+# CLIENT
 # ─────────────────────────────────────────────
-def _retry(operation: Callable):
+def get_client() -> Optional[Client]:
+    global _client
 
-    if _circuit_open():
-        logger.error("[DB] Circuit breaker OPEN — skipping")
+    if _client:
+        return _client
+
+    with _client_lock:
+        if _client:
+            return _client
+
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            logger.error("[DB] Missing config")
+            return None
+
+        try:
+            _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+            return _client
+        except Exception as e:
+            logger.error(f"[DB] init failed: {e}")
+            return None
+
+
+# ─────────────────────────────────────────────
+# EXECUTION (WITH BACKOFF + CIRCUIT)
+# ─────────────────────────────────────────────
+def _execute(fn: Callable, op: str):
+
+    if not _check_circuit():
+        logger.error(f"[DB][{op}] circuit open, skipping")
         return None
 
-    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
 
-    for attempt in range(1, MAX_RETRIES + 1):
+        start = time.time()
+
         try:
-            start = time.time()
-            result = operation()
+            res = fn()
 
-            if time.time() - start > TIMEOUT:
-                raise TimeoutError("DB operation timeout")
+            latency = (time.time() - start) * 1000
+            if latency > TIMEOUT_WARN_MS:
+                logger.warning(f"[DB][{op}] slow: {latency:.1f}ms")
 
-            _record_success()
-            return result
+            return res
 
         except Exception as e:
-            last_error = e
             _record_failure()
 
-            delay = min(BASE_DELAY * (2 ** (attempt - 1)), MAX_DELAY)
-            logger.warning(f"[DB] Attempt {attempt} failed → {e}")
+            logger.error(f"[DB][{op}] attempt {attempt}: {e}")
 
-            time.sleep(delay)
+            if attempt >= MAX_RETRIES:
+                return None
 
-    logger.error(f"[DB] All retries failed: {last_error}")
-    return None
-
-
-# ─────────────────────────────────────────────
-# SAFE EXECUTION
-# ─────────────────────────────────────────────
-def _execute(op: Callable):
-
-    client = _get_client()
-
-    if not client:
-        logger.error("[DB] No client available")
-        return None
-
-    def safe_op():
-        return op(client)
-
-    start = time.time()
-    res = _retry(safe_op)
-    latency = time.time() - start
-
-    logger.info(f"[DB] latency={latency:.3f}s")
-
-    if not res:
-        return None
-
-    return getattr(res, "data", res)
+            time.sleep(BACKOFF_BASE * (2 ** attempt))
 
 
 # ─────────────────────────────────────────────
-# INSERT FEEDBACK
+# BULK INSERT (CHUNK SAFE)
 # ─────────────────────────────────────────────
-def insert_feedback(record: Dict[str, Any]) -> bool:
+def insert_bulk(table: str, payload: List[Dict]) -> bool:
 
-    if not isinstance(record, dict):
-        logger.error("[DB] Invalid record format")
+    table = _validate_identifier(table)
+    if not table or not payload:
         return False
 
-    required = ["user_id", "predicted", "actual", "error"]
-    for k in required:
-        if k not in record:
-            logger.error(f"[DB] Missing field: {k}")
-            return False
+    if len(payload) > MAX_PAYLOAD_SIZE:
+        chunks = [
+            payload[i:i + MAX_PAYLOAD_SIZE]
+            for i in range(0, len(payload), MAX_PAYLOAD_SIZE)
+        ]
+    else:
+        chunks = [payload]
 
-    def op(client):
-        return client.table("feedback").insert(record).execute()
+    client = get_client()
+    if not client:
+        return False
 
-    return _execute(op) is not None
+    success = True
 
+    for chunk in chunks:
+        try:
+            res = _execute(
+                lambda: client.table(table).insert(chunk).execute(),
+                f"insert_{table}"
+            )
 
-# ─────────────────────────────────────────────
-# BULK INSERT
-# ─────────────────────────────────────────────
-def insert_bulk(table: str, rows: List[Dict[str, Any]], upsert: bool = False, on_conflict: str = "") -> bool:
+            if not res or not getattr(res, "data", None):
+                success = False
 
-    if not rows:
-        return True
+        except Exception as e:
+            logger.error(f"[DB] chunk insert failed: {e}")
+            success = False
 
-    def op(client):
-        query = client.table(table)
-        if upsert:
-            return query.upsert(rows, on_conflict=on_conflict).execute() if on_conflict else query.upsert(rows).execute()
-        return query.insert(rows).execute()
-
-    return _execute(op) is not None
-
-
-# ─────────────────────────────────────────────
-# FETCH FEEDBACK
-# ─────────────────────────────────────────────
-def fetch_feedback(limit: int = 1000) -> List[Dict[str, Any]]:
-
-    def op(client):
-        return (
-            client.table("feedback")
-            .select("*")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-
-    return _execute(op) or []
+    return success
 
 
 # ─────────────────────────────────────────────
-# GENERIC SELECT
+# FETCH TABLE
 # ─────────────────────────────────────────────
-def fetch_table(
-    table: str,
-    limit: int = 100,
-    filters: Optional[Dict[str, Any]] = None,
-    order_by: Optional[str] = None
-) -> List[Dict[str, Any]]:
+def fetch_table(table: str, filters: Dict = None, limit: int = 100) -> List[Dict]:
 
-    def op(client):
-        query = client.table(table).select("*").limit(limit)
+    table = _validate_identifier(table)
+    if not table:
+        return []
 
-        if filters:
+    client = get_client()
+    if not client:
+        return []
+
+    try:
+        query = client.table(table).select("*")
+
+        if isinstance(filters, dict):
             for k, v in filters.items():
                 query = query.eq(k, v)
-        
-        if order_by:
-            query = query.order(order_by, desc=True)
 
-        return query.execute()
+        res = _execute(lambda: query.limit(limit).execute(), f"fetch_{table}")
 
-    return _execute(op) or []
+        if not res or not hasattr(res, "data"):
+            return []
 
-
-# ─────────────────────────────────────────────
-# RPC CALL
-# ─────────────────────────────────────────────
-def call_rpc(function_name: str, payload: Dict[str, Any]):
-
-    def op(client):
-        return client.rpc(function_name, payload).execute()
-
-    return _execute(op)
-
-
-# ─────────────────────────────────────────────
-# HEALTH CHECK
-# ─────────────────────────────────────────────
-def check_connection() -> bool:
-    try:
-        client = _get_client()
-        if not client:
-            return False
-
-        # Schema-agnostic check: just verify the client can reach Supabase
-        # Use symptom_logs as it's guaranteed to exist in the stable schema
-        client.table("symptom_logs").select("id").limit(1).execute()
-        return True
+        return res.data or []
 
     except Exception:
-        return False
+        return []
+
 
 # ─────────────────────────────────────────────
-# USER MEMORY
+# RPC
 # ─────────────────────────────────────────────
-def get_user_memory(user_id: str) -> Dict[str, Any]:
-    def op(client):
-        res = client.table("user_memory").select("data").eq("user_id", user_id).limit(1).execute()
-        if res and hasattr(res, "data") and res.data:
-            return {"history": res.data[0].get("data", [])}
-        return {}
-    return _execute(op) or {}
+def call_rpc(func: str, params: Dict = None) -> List[Dict]:
 
-def update_user_memory(user_id: str, new_entry: Dict[str, Any]) -> bool:
-    def op(client):
-        # fetch existing
-        res = client.table("user_memory").select("data").eq("user_id", user_id).limit(1).execute()
-        current_data = []
-        if res and hasattr(res, "data") and res.data:
-            current_data = res.data[0].get("data", [])
-        
-        current_data.append(new_entry)
-        current_data = current_data[-50:]
-        
-        res = client.table("user_memory").upsert({
-            "user_id": user_id,
-            "data": current_data
-        }).execute()
-        return res
-    return _execute(op) is not None
+    func = _validate_identifier(func)
+    if not func:
+        return []
+
+    client = get_client()
+    if not client:
+        return []
+
+    try:
+        res = _execute(
+            lambda: client.rpc(func, params or {}).execute(),
+            f"rpc_{func}"
+        )
+
+        if not res or not hasattr(res, "data"):
+            return []
+
+        return res.data or []
+
+    except Exception:
+        return []

@@ -1,4 +1,4 @@
-# rag_engine.py — ELITE v3 (PRODUCTION + RESEARCH READY)
+# rag_engine.py — FINAL ELITE (GROUNDING + SAFE + CLINICAL)
 
 import logging
 import re
@@ -7,47 +7,26 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("menoeaze.rag")
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-MAX_CONTEXT_CHARS = 3500
+MAX_CONTEXT_CHARS = 3200
+MAX_DOC_CHARS = 800
 MAX_QUERY_LENGTH = 300
-MIN_DOCS_REQUIRED = 1
+MAX_SOURCES = 5
 
+MIN_DOCS_REQUIRED = 1
 MIN_RETRIEVAL_SCORE = 0.2
 
+GROUNDING_THRESHOLD = 0.25
 
 # ─────────────────────────────────────────────
 # SANITIZATION
 # ─────────────────────────────────────────────
-# Patterns that indicate prompt injection attempts
-_INJECTION_PATTERNS = [
-    r"ignore\s+(all\s+)?previous\s+instructions",
-    r"ignore\s+(all\s+)?above",
-    r"you\s+are\s+now",
-    r"new\s+instruction",
-    r"system\s*:",
-    r"assistant\s*:",
-    r"human\s*:",
-    r"forget\s+(everything|all)",
-    r"disregard\s+(all|previous|above)",
-    r"override\s+(system|prompt|rules)",
-    r"act\s+as\s+(if|a|an)",
-    r"pretend\s+(you|to)",
-]
-
 def _sanitize(text: str) -> str:
-    text = (text or "").strip()
+    if not isinstance(text, str):
+        return ""
 
-    # Prompt injection defense: strip adversarial override attempts
-    text_lower = text.lower()
-    for pattern in _INJECTION_PATTERNS:
-        if re.search(pattern, text_lower):
-            logger.warning(f"[RAG] Prompt injection attempt detected and neutralized.")
-            text = re.sub(pattern, "", text_lower, flags=re.IGNORECASE)
-
-    text = re.sub(r"[^a-zA-Z0-9\s\-_,.]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip()
+    text = re.sub(r"[^\w\s.,\-]", " ", text)
+    text = re.sub(r"\s+", " ", text)
     return text[:MAX_QUERY_LENGTH]
 
 
@@ -55,139 +34,123 @@ def _sanitize(text: str) -> str:
 # SEVERITY
 # ─────────────────────────────────────────────
 def _severity_label(severity: float) -> str:
-    if severity < 0.3:
-        return "low"
-    elif severity < 0.6:
-        return "medium"
-    return "high"
+    return "low" if severity < 0.3 else "medium" if severity < 0.6 else "high"
 
 
 # ─────────────────────────────────────────────
-# CONTEXT BUILDER (IMPROVED: PRIORITY BASED)
+# CONTEXT (DIVERSE + PRIORITY AWARE)
 # ─────────────────────────────────────────────
-def _build_context(docs: List[Dict[str, Any]]) -> str:
-    # prioritize high-score docs
+def _build_context(docs):
+
+    seen_sources = set()
+    blocks = []
+    total = 0
+
     docs = sorted(
         docs,
-        key=lambda d: d.get("final_score", d.get("rerank_score", 0)),
+        key=lambda d: d.get("priority", 0) + d.get("score", 0),
         reverse=True
     )
 
-    total = 0
-    chunks = []
-
     for d in docs:
-        content = (d.get("content") or "").strip()
-        title = d.get("title", "Unknown")
 
-        if not content:
+        source = d.get("document_name")
+        content = (d.get("content") or "").strip()
+
+        if not content or source in seen_sources:
             continue
 
-        block = f"[{title}] {content}\n\n"
+        seen_sources.add(source)
+
+        block = f"[{source}] {content[:MAX_DOC_CHARS]}\n\n"
 
         if total + len(block) > MAX_CONTEXT_CHARS:
             break
 
-        chunks.append(block)
+        blocks.append(block)
         total += len(block)
 
-    return "".join(chunks)
+    return "".join(blocks)
 
 
 # ─────────────────────────────────────────────
 # CONTEXT VALIDATION
 # ─────────────────────────────────────────────
-def _is_context_valid(docs: List[Dict[str, Any]]) -> bool:
-    if not docs or len(docs) < MIN_DOCS_REQUIRED:
+def _valid_context(docs):
+    if len(docs) < MIN_DOCS_REQUIRED:
         return False
 
-    scores = [
-        d.get("final_score", d.get("rerank_score", d.get("similarity", 0.0)))
-        for d in docs
-    ]
-
-    avg_score = sum(scores) / len(scores)
-    return avg_score > MIN_RETRIEVAL_SCORE
+    scores = [d.get("score", 0) for d in docs]
+    return (sum(scores) / len(scores)) > MIN_RETRIEVAL_SCORE
 
 
 # ─────────────────────────────────────────────
-# FALLBACK (SAFETY-FIRST MODE)
+# FALLBACK
 # ─────────────────────────────────────────────
-def _fallback(level: str) -> str:
-    _doctor_note = " And if things feel overwhelming, talking to your doctor can really help — you deserve that support."
+def _fallback(level):
+    base = "I don’t have enough reliable medical evidence to answer precisely."
+
     if level == "low":
-        return ("I don't have specific research on that right now, but I want you to know that what you're experiencing is real and valid. "
-                "In the meantime, gentle things like prioritizing sleep, staying hydrated, and nourishing your body with whole foods "
-                "can make a quiet but meaningful difference." + _doctor_note)
-    elif level == "medium":
-        return ("I wish I had more specific information for you on this one. What I can say is that when symptoms are at this level, "
-                "small, consistent shifts — like stress-relief techniques, gentle movement, and being intentional about rest — "
-                "can start to move the needle." + _doctor_note)
-    return ("I don't have enough information to give you the thorough answer you deserve on this, and I'm sorry about that. "
-            "With what you're going through right now, I'd really encourage you to reach out to your healthcare provider soon. "
-            "You don't have to push through this alone, and getting professional support is a sign of strength, not weakness. 💜")
+        return base + " General healthy habits may help."
+    if level == "medium":
+        return base + " Monitor symptoms and consider lifestyle adjustments."
+    return base + " Please consult a healthcare professional."
 
 
 # ─────────────────────────────────────────────
-# PROMPT BUILDER (EMPATHETIC + EVIDENCE-GROUNDED)
+# PROMPT
 # ─────────────────────────────────────────────
-def _build_prompt(query: str, level: str, symptoms: str, context: str) -> str:
-    return f"""You are MenoEaze — a compassionate, knowledgeable women's health companion who speaks with warmth and genuine care. You feel like a trusted friend who also happens to have deep medical knowledge.
+def _build_prompt(query, level, symptoms, context):
+    return f"""You are a clinical assistant.
 
-CORE PRINCIPLES:
-- ONLY use information from the CONTEXT provided below. Do not draw on outside knowledge.
-- If the answer isn't in the CONTEXT, be honest and gentle: "I don't have specific information on that right now, but here's what might help..."
-- Never speculate or fabricate medical claims.
-- Prioritize natural remedies and lifestyle approaches first, then mention clinical options.
-- Tailor your warmth and urgency to the person's severity level.
-- Incorporate their symptoms and historical severity into your response for personalization, but medical evidence from CONTEXT must take absolute priority. Do NOT hallucinate advice.
+STRICT:
+- Use ONLY the provided CONTEXT
+- If unsure → say you don't know
+- No hallucinations
 
-YOUR VOICE:
-- Open by acknowledging what the person is going through — show you heard them
-- Use warm, conversational language. Say "you're" not "you are". Say "that's" not "that is".
-- Keep it to 2-3 short paragraphs of flowing prose. No bullet lists, no markdown headers, no tables.
-- Close with gentle encouragement or a caring thought — never a legal disclaimer.
-
-User's question: {query}
-Their severity level: {level}
-Their symptoms: {symptoms}
+Query: {query}
+Severity: {level}
+Symptoms: {symptoms}
 
 CONTEXT:
 {context}
 
-Respond with warmth, brevity, and evidence from the context above. Be the caring, knowledgeable friend she needs right now."""
+Answer in 2 concise paragraphs.
+"""
 
 
 # ─────────────────────────────────────────────
-# SAFE LLM CALL (COMPATIBLE)
+# GROUNDING CHECK
 # ─────────────────────────────────────────────
-def _safe_llm_call(llm_client, prompt: str):
+def _grounding_score(answer: str, context: str) -> float:
+    a_tokens = set(answer.lower().split())
+    c_tokens = set(context.lower().split())
+
+    if not a_tokens:
+        return 0.0
+
+    overlap = len(a_tokens & c_tokens) / len(a_tokens)
+    return overlap
+
+
+# ─────────────────────────────────────────────
+# SAFE LLM
+# ─────────────────────────────────────────────
+def _call_llm(llm, prompt):
     try:
-        res = llm_client.generate(prompt)
+        res = llm.generate(prompt)
 
-        # handle both string + dict (robust)
         if isinstance(res, str):
-            return {
-                "text": res,
-                "latency": None,
-                "request_id": None,
-                "fallback": False
-            }
+            return res, False
 
-        return res
+        return res.get("text", ""), res.get("fallback", False)
 
-    except Exception as e:
-        logger.error(f"[RAG] LLM call failed: {e}")
-        return {
-            "text": "",
-            "latency": None,
-            "request_id": None,
-            "fallback": True
-        }
+    except Exception:
+        return "", True
 
 
 # ─────────────────────────────────────────────
-# MAIN GENERATION
+# MAIN
 # ─────────────────────────────────────────────
 def generate_answer(
     query: str,
@@ -195,96 +158,94 @@ def generate_answer(
     docs: List[Dict[str, Any]],
     symptoms: Optional[Dict[str, float]],
     llm_client,
-    return_debug: bool = False  # 🔥 NEW (for research)
-) -> Dict[str, Any]:
+    return_debug=False
+):
 
     start = time.time()
     level = _severity_label(severity)
 
-    # ── Guard: LLM missing
-    if llm_client is None:
+    if not llm_client or not docs or not _valid_context(docs):
         return {
             "answer": _fallback(level),
             "sources": [],
             "confidence": 0.0,
-            "fallback": True,
-            "reason": "no_llm",
-        }
-
-    # ── Guard: retrieval weak
-    if not _is_context_valid(docs):
-        logger.warning("[RAG] Weak retrieval")
-
-        return {
-            "answer": _fallback(level),
-            "sources": [],
-            "confidence": 0.0,
-            "fallback": True,
-            "reason": "low_retrieval",
+            "fallback": True
         }
 
     try:
         query = _sanitize(query)
         context = _build_context(docs)
 
-        # ── Symptoms formatting
         symptom_text = ""
-        if symptoms:
+        if isinstance(symptoms, dict):
             symptom_text = ", ".join(
-                f"{k.replace('_',' ')} ({v:.0%})"
-                for k, v in sorted(symptoms.items(), key=lambda x: x[1], reverse=True)
+                f"{k}:{round(v,2)}"
+                for k, v in symptoms.items()
                 if v > 0.3
             )
 
         prompt = _build_prompt(query, level, symptom_text, context)
 
-        # ── LLM CALL (SAFE)
-        res = _safe_llm_call(llm_client, prompt)
+        answer, llm_fallback = _call_llm(llm_client, prompt)
 
-        answer = res["text"].strip()
+        if not answer:
+            return {
+                "answer": _fallback(level),
+                "sources": [],
+                "confidence": 0.0,
+                "fallback": True
+            }
 
-        # ── Confidence (IMPROVED)
-        scores = [
-            d.get("final_score", d.get("rerank_score", d.get("similarity", 0.5)))
-            for d in docs
-        ]
+        # ───────── GROUNDING CHECK
+        grounding = _grounding_score(answer, context)
 
-        retrieval_conf = sum(scores) / len(scores)
+        if grounding < GROUNDING_THRESHOLD:
+            logger.warning("[RAG] hallucination detected")
+            answer = _fallback(level)
+            llm_fallback = True
 
-        # penalize fallback / empty answer
-        penalty = 0.3 if res["fallback"] or not answer else 0.0
+        # ───────── CONFIDENCE
+        retrieval_scores = [d.get("score", 0.5) for d in docs]
+        retrieval_conf = sum(retrieval_scores) / len(retrieval_scores)
 
-        confidence = max(0.0, min(1.0, retrieval_conf * (1 - penalty)))
+        confidence = (
+            0.6 * retrieval_conf +
+            0.4 * grounding
+        )
+
+        if llm_fallback:
+            confidence *= 0.6
 
         latency = (time.time() - start) * 1000
 
+        sources = list({
+            d.get("document_name", "Unknown")
+            for d in docs[:MAX_SOURCES]
+        })
+
         result = {
-            "answer": answer if answer else _fallback(level),
-            "sources": list({d.get("title", "Unknown") for d in docs}),
-            "confidence": round(confidence, 3),
+            "answer": answer.strip(),
+            "sources": sources,
+            "confidence": round(min(1.0, confidence), 3),
             "latency_ms": round(latency, 2),
-            "fallback": res["fallback"],
+            "fallback": llm_fallback
         }
 
-        # 🔥 DEBUG MODE (for report)
         if return_debug:
             result["debug"] = {
-                "num_docs": len(docs),
-                "avg_score": round(retrieval_conf, 3),
-                "context_length": len(context),
-                "llm_latency": res.get("latency"),
-                "request_id": res.get("request_id"),
+                "grounding": round(grounding, 3),
+                "docs": len(docs),
+                "context_len": len(context)
             }
 
         return result
 
     except Exception as e:
-        logger.error(f"[RAG] Generation failed: {e}")
+        logger.error(f"[RAG] fatal: {e}")
 
         return {
             "answer": _fallback(level),
             "sources": [],
             "confidence": 0.0,
-            "fallback": True,
-            "reason": "exception",
+            "fallback": True
         }

@@ -1,7 +1,8 @@
-# gating.py — ELITE (PERSONALIZATION STRATEGY SELECTOR)
+# gating.py — ELITE PERSONALIZATION GATING (MENOEAZE)
 
 import logging
-from typing import Dict, Optional, List
+from typing import Dict, List, Optional, Any
+from datetime import datetime
 
 import numpy as np
 
@@ -11,101 +12,134 @@ logger = logging.getLogger("menoeaze.gating")
 # CONFIG
 # ─────────────────────────────────────────────
 MIN_HISTORY = 5
-MAML_THRESHOLD = 5      # minimum feedback logs for MAML fast adaptation
-ADAPT_THRESHOLD = 15
+MAX_VARIANCE = 0.20
+TREND_THRESHOLD = 0.04
 
-MAX_VARIANCE = 0.25     # noisy data cutoff
-TREND_THRESHOLD = 0.05  # signal strength threshold
+MAX_FEEDBACK_AGE_DAYS = 30
+MIN_TRUST_SCORE = 0.4
+
+MIN_USER_RELIABILITY = 0.45
+MIN_CONFIDENCE_REQUIRED = 0.4
+
+OSCILLATION_THRESHOLD = 0.25
+
+
+# ─────────────────────────────────────────────
+# UTIL
+# ─────────────────────────────────────────────
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except:
+        return default
+
+
+def _days_diff(ts: float) -> float:
+    try:
+        return (datetime.utcnow().timestamp() - float(ts)) / 86400.0
+    except:
+        return 999.0
+
+
+# ─────────────────────────────────────────────
+# FILTER FEEDBACK
+# ─────────────────────────────────────────────
+def _filter_feedback(feedback: List[Dict]) -> List[Dict]:
+
+    filtered = []
+
+    for f in feedback:
+        try:
+            trust = _safe_float(f.get("trust_score", 0))
+            ts = _safe_float(f.get("ts", 0))
+
+            if trust < MIN_TRUST_SCORE:
+                continue
+
+            if _days_diff(ts) > MAX_FEEDBACK_AGE_DAYS:
+                continue
+
+            filtered.append(f)
+
+        except:
+            continue
+
+    return filtered
 
 
 # ─────────────────────────────────────────────
 # FEATURE EXTRACTION
 # ─────────────────────────────────────────────
-def _extract_error_features(
-    predictions: List[float],
-    actuals: List[float]
-) -> Dict:
+def _extract_features(preds: List[float], actuals: List[float]):
 
-    if not predictions or not actuals:
-        return {
-            "variance": 1.0,
-            "trend": 0.0,
-            "mean_error": 0.0
-        }
-
-    errors = np.array(actuals) - np.array(predictions)
+    errors = np.array(actuals) - np.array(preds)
 
     variance = float(np.var(errors))
-
     trend = float(errors[-1] - errors[0]) if len(errors) > 2 else 0.0
 
-    mean_error = float(np.mean(errors))
+    # oscillation = instability
+    diffs = np.diff(errors) if len(errors) > 2 else []
+    oscillation = float(np.mean(np.abs(diffs))) if len(diffs) else 0.0
 
-    return {
-        "variance": variance,
-        "trend": trend,
-        "mean_error": mean_error
-    }
+    return variance, trend, oscillation
 
 
 # ─────────────────────────────────────────────
-# MAIN GATING LOGIC
+# MAIN GATING
 # ─────────────────────────────────────────────
 def select_strategy(
-    user_history: Optional[Dict]
+    history: Optional[List[Dict]],
+    feedback: Optional[List[Dict]],
+    model_confidence: float = 0.5,
+    user_reliability: float = 0.0
 ) -> str:
     """
     Returns:
-        'none' | 'bias' | 'maml' | 'adapt'
+        'none' | 'bias'
     """
 
     try:
-        if not user_history:
+        history = history or []
+        feedback = feedback or []
+
+        # ── basic guards ───────────────────
+        if model_confidence < MIN_CONFIDENCE_REQUIRED:
             return "none"
 
-        predictions = user_history.get("predictions", [])
-        actuals = user_history.get("actuals", [])
-        feedback_logs = user_history.get("feedback_logs", [])
-
-        # Phase 5: MAML uses feedback_logs (raw sequence + actual_severity dicts)
-        # independently of the predictions/actuals alignment.
-        # Check this FIRST since a user may have feedback_logs without
-        # aligned pred/actual pairs (e.g., submitted feedback but no /run calls).
-        n_feedback = len(feedback_logs)
-
-        # Standard pred/actual alignment count
-        n = min(len(predictions), len(actuals)) if predictions and actuals else 0
-
-        # ── Not enough data from either source ───
-        if n < MIN_HISTORY and n_feedback < MAML_THRESHOLD:
+        if user_reliability < MIN_USER_RELIABILITY:
             return "none"
 
-        # ── Extract features (only if we have aligned pred/actual data) ──
-        if n >= MIN_HISTORY:
-            feats = _extract_error_features(predictions[-30:], actuals[-30:])
+        # ── filter feedback ────────────────
+        feedback = _filter_feedback(feedback)
 
-            variance = feats["variance"]
-            trend = abs(feats["trend"])
+        preds = []
+        actuals = []
 
-            # ── Noisy data → avoid adaptation ─────
-            if variance > MAX_VARIANCE:
-                return "bias"
+        for f in feedback:
+            preds.append(_safe_float(f.get("predicted", 0.5)))
+            actuals.append(_safe_float(f.get("actual", 0.5)))
 
-            # ── Enough data for full adaptation ───
-            if n >= ADAPT_THRESHOLD and trend > TREND_THRESHOLD:
-                return "adapt"
+        n = min(len(preds), len(actuals))
 
-        # ── Phase 5: MAML fast adaptation ─────
-        # Requires feedback_logs with sequence + actual_severity.
-        # Fewer samples needed than full adapt, more than bias.
-        if n_feedback >= MAML_THRESHOLD:
-            return "maml"
+        if n < MIN_HISTORY:
+            return "none"
 
-        # ── Have some pred/actual data but not enough for MAML ───
-        if n >= MIN_HISTORY:
+        variance, trend, oscillation = _extract_features(
+            preds[-30:], actuals[-30:]
+        )
+
+        # ── noisy → disable ────────────────
+        if variance > MAX_VARIANCE:
+            return "none"
+
+        # ── unstable user → disable ────────
+        if oscillation > OSCILLATION_THRESHOLD:
+            return "none"
+
+        # ── stable signal → allow bias ─────
+        if abs(trend) > TREND_THRESHOLD:
             return "bias"
 
-        # ── Default safe option ───────────────
         return "none"
 
     except Exception as e:
@@ -114,44 +148,70 @@ def select_strategy(
 
 
 # ─────────────────────────────────────────────
-# DEBUG INFO (OPTIONAL)
+# EXPLAINABILITY
 # ─────────────────────────────────────────────
 def explain_strategy(
-    user_history: Optional[Dict]
-) -> Dict:
-    """
-    Returns detailed reasoning for debugging / analytics
-    """
+    history: Optional[List[Dict]],
+    feedback: Optional[List[Dict]],
+    model_confidence: float = 0.5,
+    user_reliability: float = 0.0
+) -> Dict[str, Any]:
 
-    if not user_history:
-        return {"strategy": "none", "reason": "no_history"}
+    try:
+        feedback = _filter_feedback(feedback or [])
 
-    predictions = user_history.get("predictions", [])
-    actuals = user_history.get("actuals", [])
+        preds = []
+        actuals = []
 
-    n = min(len(predictions), len(actuals))
+        for f in feedback:
+            preds.append(_safe_float(f.get("predicted", 0.5)))
+            actuals.append(_safe_float(f.get("actual", 0.5)))
 
-    if n < MIN_HISTORY:
-        return {"strategy": "none", "reason": "insufficient_data"}
+        n = min(len(preds), len(actuals))
 
-    feats = _extract_error_features(predictions[-30:], actuals[-30:])
+        if model_confidence < MIN_CONFIDENCE_REQUIRED:
+            return {"strategy": "none", "reason": "low_model_confidence"}
 
-    if feats["variance"] > MAX_VARIANCE:
+        if user_reliability < MIN_USER_RELIABILITY:
+            return {"strategy": "none", "reason": "low_user_reliability"}
+
+        if n < MIN_HISTORY:
+            return {"strategy": "none", "reason": "insufficient_data"}
+
+        variance, trend, oscillation = _extract_features(
+            preds[-30:], actuals[-30:]
+        )
+
+        if variance > MAX_VARIANCE:
+            return {
+                "strategy": "none",
+                "reason": "high_variance",
+                "variance": variance
+            }
+
+        if oscillation > OSCILLATION_THRESHOLD:
+            return {
+                "strategy": "none",
+                "reason": "unstable_feedback",
+                "oscillation": oscillation
+            }
+
+        if abs(trend) > TREND_THRESHOLD:
+            return {
+                "strategy": "bias",
+                "reason": "stable_trend",
+                "trend": trend
+            }
+
         return {
-            "strategy": "bias",
-            "reason": "high_variance",
-            "features": feats
+            "strategy": "none",
+            "reason": "weak_signal",
+            "trend": trend
         }
 
-    if n >= ADAPT_THRESHOLD and abs(feats["trend"]) > TREND_THRESHOLD:
+    except Exception as e:
         return {
-            "strategy": "adapt",
-            "reason": "stable_signal",
-            "features": feats
+            "strategy": "none",
+            "reason": "error",
+            "error": str(e)
         }
-
-    return {
-        "strategy": "bias",
-        "reason": "default_safe",
-        "features": feats
-    }

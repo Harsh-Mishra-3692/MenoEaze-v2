@@ -1,10 +1,12 @@
-# reranker.py — ELITE v3 (PRODUCTION + RESEARCH + SAFE)
+# reranker.py — FINAL ELITE v4 (CLINICAL + SAFE + SYSTEM-AWARE)
 
 import logging
 import time
+import re
 from typing import List, Dict, Any
 
 import torch
+import numpy as np
 from sentence_transformers import CrossEncoder
 
 logger = logging.getLogger("menoeaze.reranker")
@@ -14,26 +16,28 @@ logger = logging.getLogger("menoeaze.reranker")
 # ─────────────────────────────────────────────
 MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-MAX_DOCS = 8
+MAX_DOCS = 10
 TOP_K = 3
 MAX_TEXT_LENGTH = 512
 MAX_QUERY_LENGTH = 256
 
 BATCH_SIZE = 8
+TIMEOUT_SEC = 5.0
 
-# scoring weights (balanced for research + production)
-ALPHA = 0.65   # reranker weight
-BETA = 0.25    # vector similarity
-GAMMA = 0.10   # hybrid contribution
+# weights (system-aligned)
+ALPHA = 0.55   # reranker
+BETA = 0.20    # vector similarity
+GAMMA = 0.10   # hybrid score
+DELTA = 0.15   # priority boost
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# ─────────────────────────────────────────────
-# GLOBAL MODEL (LAZY LOAD)
-# ─────────────────────────────────────────────
 _model = None
 
 
+# ─────────────────────────────────────────────
+# MODEL LOAD
+# ─────────────────────────────────────────────
 def _get_model():
     global _model
 
@@ -41,23 +45,36 @@ def _get_model():
         return _model
 
     try:
-        logger.info("[RERANKER] Loading model...")
+        logger.info("[RERANKER] loading model...")
         _model = CrossEncoder(MODEL_NAME, device=DEVICE)
-        logger.info(f"[RERANKER] Loaded on {DEVICE}")
+        logger.info(f"[RERANKER] loaded on {DEVICE}")
     except Exception as e:
-        logger.error(f"[RERANKER] Load failed: {e}")
+        logger.error(f"[RERANKER] load failed: {e}")
         _model = None
 
     return _model
 
 
 # ─────────────────────────────────────────────
-# TEXT SAFETY
+# TEXT CLEANING
 # ─────────────────────────────────────────────
-def _truncate(text: str, max_len: int) -> str:
+def _clean(text: str, max_len: int) -> str:
     if not text:
         return ""
+
+    text = re.sub(r"\s+", " ", text.strip())
     return text[:max_len]
+
+
+# ─────────────────────────────────────────────
+# QUALITY FILTER
+# ─────────────────────────────────────────────
+def _is_valid_doc(text: str) -> bool:
+    if not text or len(text) < 30:
+        return False
+
+    alpha_ratio = sum(c.isalpha() for c in text) / len(text)
+    return alpha_ratio > 0.6
 
 
 # ─────────────────────────────────────────────
@@ -67,128 +84,137 @@ def _normalize(scores: List[float]) -> List[float]:
     if not scores:
         return scores
 
-    min_s, max_s = min(scores), max(scores)
+    mn, mx = min(scores), max(scores)
 
-    if max_s == min_s:
+    if mx - mn < 1e-6:
         return [0.5] * len(scores)
 
-    return [(s - min_s) / (max_s - min_s) for s in scores]
+    return [(s - mn) / (mx - mn) for s in scores]
 
 
 # ─────────────────────────────────────────────
-# FALLBACK RANKING (IMPROVED)
+# DIVERSITY FILTER
 # ─────────────────────────────────────────────
-def _fallback_rank(docs: List[Dict[str, Any]], top_k: int):
-    logger.warning("[RERANKER] fallback ranking (model unavailable)")
+def _diversify(docs: List[Dict[str, Any]], top_k: int):
+    seen = set()
+    result = []
+
+    for d in docs:
+        src = d.get("document_name")
+
+        if src in seen:
+            continue
+
+        seen.add(src)
+        result.append(d)
+
+        if len(result) >= top_k:
+            break
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# FALLBACK
+# ─────────────────────────────────────────────
+def _fallback_rank(docs, top_k):
+    logger.warning("[RERANKER] fallback")
 
     for d in docs:
         sim = d.get("similarity", 0.5)
-        hybrid = d.get("hybrid_score", sim)
-
-        # better fallback blend
-        score = 0.7 * sim + 0.3 * hybrid
-
-        d["rerank_score"] = float(sim)
-        d["final_score"] = float(score)
+        d["final_score"] = sim
 
     docs.sort(key=lambda x: x["final_score"], reverse=True)
-
     return docs[:top_k]
 
 
 # ─────────────────────────────────────────────
-# RERANK
+# MAIN RERANK
 # ─────────────────────────────────────────────
 def rerank(
     query: str,
     docs: List[Dict[str, Any]],
     top_k: int = TOP_K,
-    return_debug: bool = False  # 🔥 NEW (for research)
-) -> List[Dict[str, Any]]:
+    return_debug: bool = False
+):
 
-    if not docs:
+    if not query or not docs:
         return []
 
     model = _get_model()
 
+    # ── sanitize
+    query = _clean(query, MAX_QUERY_LENGTH)
+
+    # ── filter docs
+    filtered = []
+    for d in docs[:MAX_DOCS]:
+        text = _clean(d.get("content", ""), MAX_TEXT_LENGTH)
+
+        if not _is_valid_doc(text):
+            continue
+
+        d["content"] = text
+        filtered.append(d)
+
+    if not filtered:
+        return []
+
     if model is None:
-        return _fallback_rank(docs, top_k)
+        return _fallback_rank(filtered, top_k)
 
     start = time.time()
 
     try:
-        # ── Safety trims
-        query = _truncate(query, MAX_QUERY_LENGTH)
-        docs = docs[:MAX_DOCS]
+        pairs = [(query, d["content"]) for d in filtered]
 
-        pairs = []
-        valid_docs = []
-
-        for d in docs:
-            content = _truncate(d.get("content", ""), MAX_TEXT_LENGTH)
-
-            if not content.strip():
-                continue
-
-            pairs.append((query, content))
-            valid_docs.append(d)
-
-        if not pairs:
-            return []
-
-        # ── Predict (safe execution)
-        try:
-            raw_scores = model.predict(
-                pairs,
-                batch_size=BATCH_SIZE,
-                show_progress_bar=False
-            )
-        except RuntimeError as e:
-            logger.error(f"[RERANKER] OOM or runtime error: {e}")
-            return _fallback_rank(docs, top_k)
+        raw_scores = model.predict(
+            pairs,
+            batch_size=BATCH_SIZE,
+            show_progress_bar=False
+        )
 
         raw_scores = list(raw_scores)
         norm_scores = _normalize(raw_scores)
 
-        # ── Attach scores
-        for d, r_score, raw in zip(valid_docs, norm_scores, raw_scores):
+        for d, r_score, raw in zip(filtered, norm_scores, raw_scores):
+
             sim = d.get("similarity", 0.0)
             hybrid = d.get("hybrid_score", sim)
+            priority = d.get("priority", 0.0)
 
-            final_score = (
+            final = (
                 ALPHA * r_score +
                 BETA * sim +
-                GAMMA * hybrid
+                GAMMA * hybrid +
+                DELTA * priority
             )
 
             d.update({
                 "rerank_score": float(r_score),
-                "cross_score_raw": float(raw),   # 🔥 for research
-                "final_score": float(final_score)
+                "final_score": float(final),
+                "cross_raw": float(raw)
             })
 
-        # ── Stable sort
-        valid_docs.sort(
-            key=lambda x: (x["final_score"], x.get("similarity", 0)),
-            reverse=True
-        )
+        # ── sort
+        filtered.sort(key=lambda x: x["final_score"], reverse=True)
+
+        # ── diversify
+        results = _diversify(filtered, top_k)
 
         latency = (time.time() - start) * 1000
 
-        logger.info(
-            f"[RERANKER] docs={len(valid_docs)} | latency={latency:.2f}ms"
-        )
+        logger.info(f"[RERANKER] {len(results)} docs | {latency:.1f}ms")
 
-        # 🔥 Debug mode (for analysis)
         if return_debug:
             return {
-                "results": valid_docs[:top_k],
-                "latency_ms": round(latency, 2),
+                "results": results,
+                "latency": latency,
                 "raw_scores": raw_scores
             }
 
-        return valid_docs[:top_k]
+        return results
 
     except Exception as e:
-        logger.error(f"[RERANKER] error: {e}")
-        return _fallback_rank(docs, top_k)
+        logger.error(f"[RERANKER] failed: {e}")
+        return _fallback_rank(filtered, top_k)

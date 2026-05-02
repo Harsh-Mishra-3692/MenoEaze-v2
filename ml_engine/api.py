@@ -1,406 +1,286 @@
-# api.py — PRODUCTION-GRADE ORCHESTRATOR (HARDENED + STABLE)
+# api.py — FINAL ELITE v2 (FULL PRODUCTION ORCHESTRATOR)
 
 import time
-import math
 import asyncio
-from typing import Dict, List, Optional
+import uuid
+import hashlib
+from typing import List, Optional
 
-import torch
 import numpy as np
-import threading
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel, validator
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
-from contextlib import asynccontextmanager
+from ml_engine.pipeline import full_pipeline, predict
+from ml_engine.db_client import (
+    insert_symptom_log,
+    fetch_recent_logs,
+    insert_prediction,
+    insert_feedback,
+    fetch_prediction_history,
+    fetch_feedback_history,
+    insert_guardrail_log
+)
+from ml_engine.memory import add_prediction_context, get_full_history
+from ml_engine.clinical_guardrail import apply_guardrail
+from ml_engine.trust_filter import compute_trust_single
+from ml_engine.logger import get_logger, set_request_id
+from ml_engine.personalization_trainer import update_personalization_from_feedback
+from ml_engine.build_features import build_features
 
-# Internal modules
-from ml_engine.pipeline import full_pipeline
-from ml_engine.data_collector import build_feedback_record
-from ml_engine.db_client import insert_feedback, check_connection, fetch_table, insert_bulk
-from ml_engine.continual_train import train_incremental
-
-import ml_engine.pipeline as pipeline
-from ml_engine.adaptation_worker import learning_buffer, start_worker_thread
-from ml_engine.model_loader import load_model as ml_load_model
-
-# NEW: use centralized logger
-from ml_engine.logger import get_logger, init_logging, set_request_id, clear_request_id
-
-# ─────────────────────────────────────────────
-# INIT LOGGING
-# ─────────────────────────────────────────────
-init_logging()
 logger = get_logger("menoeaze.api")
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
 SEQ_LEN = 5
 FEATURES = 11
-MAX_MEMORY = 50
+PIPELINE_TIMEOUT = 6.0
+DB_TIMEOUT = 2.0
+MAX_QUERY_LEN = 500
+MIN_USER_ID_LEN = 10
+
+app = FastAPI(title="MenoEaze API")
+
 
 # ─────────────────────────────────────────────
-# DB INTEGRATION HELPERS (PHASE 2.4)
-# ─────────────────────────────────────────────
-async def safe_db_call(fn, *args, **kwargs):
-    try:
-        res = await asyncio.wait_for(asyncio.to_thread(fn, *args, **kwargs), timeout=2.0)
-        return True, res
-    except Exception as e:
-        logger.error(f"safe_db_call failed: {e}")
-        return False, None
-
-async def _get_db_sequence(user_id: str):
-    success, logs = await safe_db_call(fetch_table, "symptom_logs", limit=5, filters={"user_id": user_id}, order_by="created_at")
-    if not success:
-        return False, logs
-        
-    if logs and len(logs) >= 3:
-        logs.reverse()  # chronological order
-        seq = []
-        for r in logs:
-            vec = r.get("feature_vector", [])
-            if isinstance(vec, list) and len(vec) == FEATURES and all(isinstance(v, (int, float)) and math.isfinite(v) for v in vec):
-                seq.append(vec)
-        if len(seq) == len(logs):
-            return True, seq
-        return False, "Invalid DB sequence"
-    return False, "Not enough data"
-
-from ml_engine.db_client import insert_feedback, check_connection, fetch_table, insert_bulk, get_user_memory, update_user_memory
-
-async def _load_user_memory(user_id: str):
-    success, mem = await safe_db_call(get_user_memory, user_id)
-    if success:
-        history = mem.get("history", [])
-        return True, history[-MAX_MEMORY:]
-    return False, []
-
-async def _save_user_memory(user_id: str, new_entry: dict):
-    success, res = await safe_db_call(update_user_memory, user_id, new_entry)
-    if not success:
-        logger.error(f"user_memory save failed")
-    return success
-
-# ─────────────────────────────────────────────
-# MODEL HOT SWAP
-# ─────────────────────────────────────────────
-_current_model_timestamp: int = 0
-
-async def _periodic_model_refresh():
-    global _current_model_timestamp
-    while True:
-        try:
-            model, metadata = ml_load_model()
-            new_ts = metadata.get("timestamp") or 0
-
-            if new_ts > _current_model_timestamp:
-                logger.info(f"Hot-swapping model → ts={new_ts}")
-
-                pipeline._model = model
-                pipeline._model.to(pipeline.DEVICE)
-                pipeline._model.eval()
-
-                _current_model_timestamp = new_ts
-
-        except Exception as e:
-            logger.error(f"Model refresh failed: {e}")
-
-        await asyncio.sleep(60)
-
-# ─────────────────────────────────────────────
-# LIFECYCLE
-# ─────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("API starting...")
-
-    start_worker_thread(check_interval_seconds=60, min_batch_size=50)
-    asyncio.create_task(_periodic_model_refresh())
-
-    yield
-
-# ─────────────────────────────────────────────
-# APP INIT
-# ─────────────────────────────────────────────
-app = FastAPI(title="MenoEaze AI", lifespan=lifespan)
-
-# ⚠️ FIXED: restrict in production
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # change to frontend URL in prod
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ─────────────────────────────────────────────
-# REQUEST MIDDLEWARE (TRACE ID)
+# MIDDLEWARE
 # ─────────────────────────────────────────────
 @app.middleware("http")
-async def add_request_id(request: Request, call_next):
-    request_id = str(time.time())
-    set_request_id(request_id)
+async def add_request_context(request: Request, call_next):
+    req_id = str(uuid.uuid4())
+    set_request_id(req_id)
 
-    try:
-        response = await call_next(request)
-        return response
-    finally:
-        clear_request_id()
+    start = time.time()
+    response = await call_next(request)
+    latency = round((time.time() - start) * 1000, 2)
 
-# ─────────────────────────────────────────────
-# VALIDATION UTIL
-# ─────────────────────────────────────────────
-def sanitize_sequence(seq):
-    arr = np.array(seq, dtype=np.float32)
+    response.headers["X-Request-ID"] = req_id
 
-    if arr.shape != (SEQ_LEN, FEATURES):
-        return False, f"Invalid shape {arr.shape}"
+    logger.info(f"{request.method} {request.url.path} | {latency}ms | {req_id}")
 
-    if not np.isfinite(arr).all():
-        logger.error("NaN/Inf detected in input sequence")
-        return False, "NaN/Inf detected"
+    return response
 
-    return True, arr
 
 # ─────────────────────────────────────────────
 # SCHEMAS
 # ─────────────────────────────────────────────
+class LogSymptomRequest(BaseModel):
+    user_id: str
+    feature_vector: List[float]
+    notes: Optional[str] = ""
+    emoji: Optional[str] = ""
+
+    @validator("feature_vector")
+    def validate_vector(cls, v):
+        if len(v) != FEATURES:
+            raise ValueError("feature_vector must be length 11")
+        if any([not np.isfinite(x) for x in v]):
+            raise ValueError("Invalid numeric values")
+        return [float(max(-5, min(10, x))) for x in v]
+
+
 class RunRequest(BaseModel):
     user_id: str
     query: str
-    sequence: Optional[List[List[float]]] = None
 
-    @field_validator("sequence")
-    def validate(cls, v):
-        if v is None: return v
-        ok, data = sanitize_sequence(v)
-        if not ok: raise ValueError(data)
-        return data.tolist()
+    @validator("user_id")
+    def validate_user(cls, v):
+        if not v or len(v) < MIN_USER_ID_LEN:
+            raise ValueError("Invalid user_id")
+        return v
+
+    @validator("query")
+    def validate_query(cls, v):
+        v = v.strip()
+        if not v or len(v) < 3:
+            raise ValueError("Invalid query")
+        return v[:MAX_QUERY_LEN]
 
 
-class PredictRequest(BaseModel):
+class FeedbackRequest(BaseModel):
     user_id: str
-    sequence: List[List[float]]
+    prediction_id: str
+    predicted: float
+    actual: float
+    rating: int
 
-    @field_validator("sequence")
-    def validate(cls, v):
-        ok, data = sanitize_sequence(v)
-        if not ok: raise ValueError(data)
-        return data.tolist()
-
-
-class QueryRequest(BaseModel):
-    user_id: str
-    query: str
 
 # ─────────────────────────────────────────────
-# RESPONSE FORMATTER (UNIFIED)
+# HELPERS
 # ─────────────────────────────────────────────
-def format_response(request: Request, response_dict: dict):
-    return response_dict
+def _sanitize_text(text: str, max_len=300):
+    try:
+        return str(text).strip()[:max_len]
+    except:
+        return ""
+
+
+def build_sequence(logs):
+    seq = [
+        l.get("feature_vector")
+        for l in logs
+        if isinstance(l.get("feature_vector"), list)
+        and len(l.get("feature_vector")) == FEATURES
+    ]
+    if len(seq) < 3:
+        return None
+    return np.array(seq[-SEQ_LEN:], dtype=np.float32)
+
+
+def safe_prediction(pred: dict):
+    try:
+        return (
+            max(0.0, min(1.0, float(pred.get("severity", 0.5)))),
+            max(0.0, min(1.0, float(pred.get("confidence", 0.5))))
+        )
+    except:
+        return 0.5, 0.5
+
+
+def _idempotency_key(user_id, query):
+    return hashlib.md5(f"{user_id}:{query}".encode()).hexdigest()
+
 
 # ─────────────────────────────────────────────
-# ROUTES
+# LOG SYMPTOM
 # ─────────────────────────────────────────────
-@app.get("/health")
-def health():
-    model_loaded = pipeline._model is not None
-    db_connected = check_connection()
-    llm_ready = pipeline._llm and getattr(pipeline._llm, "api_key", None)
-    
-    issues = []
-    if not model_loaded: issues.append("Model missing")
-    if not db_connected: issues.append("DB disconnected")
-    if not llm_ready: issues.append("LLM missing")
+@app.post("/log-symptom")
+async def log_symptom(data: LogSymptomRequest):
 
-    return format_response(None, {
-        "status": "degraded" if issues else "success",
-        "reason": "OK" if not issues else "Health checks failed",
-        "data": {
-            "model": "loaded" if model_loaded else "missing",
-            "db": "connected" if db_connected else "down",
-            "llm": "ready" if llm_ready else "missing",
-            "issues": issues
-        }
-    })
+    ok = insert_symptom_log(
+        user_id=data.user_id,
+        feature_vector=data.feature_vector,
+        raw_text=_sanitize_text(data.notes),
+        emoji=_sanitize_text(data.emoji, 10)
+    )
+
+    if not ok:
+        raise HTTPException(500, "Failed to store symptom log")
+
+    asyncio.create_task(asyncio.to_thread(build_features))
+
+    return {"status": "logged"}
+
 
 # ─────────────────────────────────────────────
-# FULL PIPELINE
+# RUN PIPELINE
 # ─────────────────────────────────────────────
 @app.post("/run")
-async def run_pipeline(data: RunRequest, request: Request):
+async def run(data: RunRequest):
+
     start = time.time()
-    logger.info(f"POST /run started | user={data.user_id}")
+    request_key = _idempotency_key(data.user_id, data.query)
 
-    try:
-        db_error = None
-        
-        success, res = await _get_db_sequence(data.user_id)
-        db_seq = res if success else None
-        if not success and res != "Not enough data":
-            db_error = res
+    logs = fetch_recent_logs(data.user_id)
+    seq = build_sequence(logs)
 
-        mem_success, mem_res = await _load_user_memory(data.user_id)
-        history = mem_res if mem_success else []
-        if not mem_success:
-            db_error = mem_res
+    if seq is None:
+        raise HTTPException(400, "Not enough historical data")
 
-        final_seq = np.array(db_seq) if db_seq else (np.array(data.sequence) if data.sequence else None)
+    # ───────── PREDICTION
+    pred_res = await asyncio.to_thread(predict, seq, data.user_id)
+    sev, conf = safe_prediction(pred_res)
 
-        result = full_pipeline(
-            user_id=data.user_id,
-            query=data.query,
-            sequence=final_seq,
-            user_history={
-                "predictions": [h.get("pred") for h in history],
-                "actuals": [h.get("actual") for h in history],
-                "feedback_logs": [h for h in history if "sequence" in h],
-            }
-        )
+    user_history = await asyncio.to_thread(get_full_history, data.user_id)
 
-        entry = {
-            "ts": time.time(),
-            "query": data.query,
+    # ───────── GUARDRAIL (EARLY)
+    guard = apply_guardrail(query=data.query, severity=sev, user_history=user_history)
+
+    if guard.get("override"):
+        insert_guardrail_log(user_id=data.user_id, **guard)
+        return {
+            "prediction": {"severity": sev, "confidence": conf, "prediction_id": None},
+            "risk": guard,
+            "rag": {"answer": guard["message"], "sources": []},
+            "request_id": request_key,
+            "latency_ms": round((time.time() - start) * 1000, 2)
         }
 
-        if result.get("prediction"):
-            entry["pred"] = result["prediction"]["severity"]
+    # ───────── PIPELINE
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                full_pipeline,
+                user_id=data.user_id,
+                query=data.query,
+                sequence=seq,
+                user_history=user_history
+            ),
+            timeout=PIPELINE_TIMEOUT
+        )
+    except Exception:
+        logger.error("[API] pipeline failed")
+        result = {
+            "prediction": {"severity": 0.5, "confidence": 0.3},
+            "rag": {"answer": "Fallback triggered", "sources": []}
+        }
 
-        # Append to DB atomically
-        save_success = await _save_user_memory(data.user_id, entry)
+    sev, conf = safe_prediction(result.get("prediction", {}))
+    rag = result.get("rag", {})
 
-        prediction = result.get("prediction", {})
-        rag = result.get("rag", {})
-        
-        status = "success"
-        reason = "OK"
-        if "error" in prediction:
-            status, reason = "degraded", "model"
-        elif db_error or not save_success:
-            status, reason = "degraded", "db"
-        elif "error" in rag or rag.get("fallback"):
-            status, reason = "degraded", "llm"
-
-        result["latency_ms"] = round((time.time() - start) * 1000, 2)
-        logger.info(f"POST /run success | latency={result['latency_ms']}ms")
-
-        return format_response(request, {"status": status, "reason": reason, "data": result})
-
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        return format_response(request, {"status": "error", "reason": str(e), "data": {}})
+    # ───────── STORE (SAFE)
+    prediction_id = None
+    try:
+        prediction_id = insert_prediction(
+            user_id=data.user_id,
+            severity=sev,
+            confidence=conf,
+            reasoning=rag.get("answer", "")
+        )
     except Exception as e:
-        logger.exception("POST /run failed")
-        return format_response(request, {"status": "error", "reason": str(e), "data": {}})
+        logger.error(f"[API] prediction store failed: {e}")
 
-# ─────────────────────────────────────────────
-# PREDICT
-# ─────────────────────────────────────────────
-@app.post("/predict")
-async def predict(data: PredictRequest, request: Request):
-    logger.warning("POST /predict is deprecated. Use POST /run instead.")
-    return format_response(request, {
-        "status": "error",
-        "reason": "Deprecated: Use POST /run",
-        "data": {}
-    })
+    try:
+        add_prediction_context(
+            user_id=data.user_id,
+            query=data.query,
+            severity=sev,
+            confidence=conf
+        )
+    except:
+        pass
 
-# ─────────────────────────────────────────────
-# QUERY
-# ─────────────────────────────────────────────
-@app.post("/query")
-async def query(data: QueryRequest, request: Request):
-    logger.warning("POST /query is deprecated. Use POST /run instead.")
-    return format_response(request, {
-        "status": "error",
-        "reason": "Deprecated: Use POST /run",
-        "data": {}
-    })
+    latency = round((time.time() - start) * 1000, 2)
+
+    return {
+        "prediction": {
+            "severity": round(sev, 4),
+            "confidence": round(conf, 4),
+            "prediction_id": prediction_id
+        },
+        "rag": rag,
+        "request_id": request_key,
+        "latency_ms": latency
+    }
+
 
 # ─────────────────────────────────────────────
 # FEEDBACK
 # ─────────────────────────────────────────────
-_training_lock = asyncio.Lock()
-_last_training_ts: float = 0.0
-
 @app.post("/feedback")
-async def feedback(data: dict, request: Request):
-    global _last_training_ts
-    user_id = data.get("user_id", "unknown")
-    logger.info(f"POST /feedback started | user={user_id}")
+async def feedback(data: FeedbackRequest):
+
+    predicted = max(0.0, min(1.0, data.predicted))
+    actual = max(0.0, min(1.0, data.actual))
+    rating = max(1, min(10, data.rating))
+
+    trust_score = compute_trust_single({
+        "predicted": predicted,
+        "actual": actual,
+        "rating": rating
+    })
+
     try:
-        # DB write (with timeout to ensure truthfulness but prevent hangs)
-        record = build_feedback_record(
-            user_id=data.get("user_id", ""),
-            predicted=data.get("predicted", 0.0),
-            actual=data.get("actual", data.get("actual_severity", 0.0)),
-            error=data.get("error", 0.0),
+        insert_feedback(
+            user_id=data.user_id,
+            prediction_id=data.prediction_id,
+            predicted=predicted,
+            actual=actual,
+            rating=rating,
+            trust_score=trust_score
         )
-        
-        success, _ = await safe_db_call(insert_feedback, record)
-        if not success:
-            logger.error(f"Feedback DB write timeout for user {user_id}")
-            return format_response(request, {"status": "degraded", "reason": "db", "data": {}})
-
-        # sanitize
-        sequence = data.get("sequence")
-        actual = data.get("actual_severity")
-
-        if sequence is not None and actual is not None:
-            ok, seq = sanitize_sequence(sequence)
-            if not ok:
-                return format_response(request, {"status": "error", "reason": seq, "data": {}})
-            actual = float(actual) if math.isfinite(float(actual)) else 0.0
-
-            # Prevent consecutive duplicates
-            seq_t = torch.tensor(seq, dtype=torch.float32)
-            y_t = torch.tensor([actual], dtype=torch.float32)
-            is_dup = False
-            if learning_buffer.buffer:
-                last_x, last_y = learning_buffer.buffer[-1]
-                if torch.allclose(last_x, seq_t) and torch.allclose(last_y, y_t):
-                    is_dup = True
-            
-            if not is_dup:
-                learning_buffer.add_sample(seq_t, y_t)
-                if len(learning_buffer.buffer) > 50:
-                    learning_buffer.buffer.pop(0)  # drop oldest
-
-            # memory update
-            mem_success, mem_res = await _load_user_memory(data.get("user_id"))
-            new_entry = {
-                "sequence": seq.tolist(),
-                "actual": actual,
-                "ts": time.time()
-            }
-            save_ok = await _save_user_memory(data.get("user_id"), new_entry)
-            if not save_ok:
-                logger.error(f"Feedback memory write failed for {user_id}")
-                return format_response(request, {"status": "degraded", "reason": "Database memory write failed", "data": {}})
-            
-            # Phase 2.4: Safe Training Trigger
-            if len(learning_buffer.buffer) >= 5:
-                now = time.time()
-                if now - _last_training_ts > 5.0:
-                    x_b, y_b = learning_buffer.get_batch(5)
-                    if x_b.numel() > 0 and not torch.isnan(x_b).any() and not torch.isnan(y_b).any():
-                        batch = (x_b, y_b)
-                        async def _run_train(batch):
-                            try:
-                                async with _training_lock:
-                                    await asyncio.to_thread(train_incremental, batch)
-                            except Exception as e:
-                                logger.error(f"Training task failed: {e}")
-                        asyncio.create_task(_run_train(batch))
-
-        logger.info(f"POST /feedback success | user={user_id}")
-        return format_response(request, {"status": "success", "reason": "OK", "data": {}})
-
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        return format_response(request, {"status": "error", "reason": str(e), "data": {}})
     except Exception as e:
-        logger.exception("POST /feedback failed")
-        return format_response(request, {"status": "error", "reason": str(e), "data": {}})
+        logger.error(f"[API] feedback insert failed: {e}")
+
+    asyncio.create_task(
+        asyncio.to_thread(update_personalization_from_feedback, data.user_id)
+    )
+
+    return {"status": "ok", "trust_score": round(trust_score, 4)}
