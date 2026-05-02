@@ -264,3 +264,32 @@ def check_connection() -> bool:
 
     except Exception:
         return False
+
+# ─────────────────────────────────────────────
+# USER MEMORY
+# ─────────────────────────────────────────────
+def get_user_memory(user_id: str) -> Dict[str, Any]:
+    def op(client):
+        res = client.table("user_memory").select("data").eq("user_id", user_id).limit(1).execute()
+        if res and hasattr(res, "data") and res.data:
+            return {"history": res.data[0].get("data", [])}
+        return {}
+    return _execute(op) or {}
+
+def update_user_memory(user_id: str, new_entry: Dict[str, Any]) -> bool:
+    def op(client):
+        # fetch existing
+        res = client.table("user_memory").select("data").eq("user_id", user_id).limit(1).execute()
+        current_data = []
+        if res and hasattr(res, "data") and res.data:
+            current_data = res.data[0].get("data", [])
+        
+        current_data.append(new_entry)
+        current_data = current_data[-50:]
+        
+        res = client.table("user_memory").upsert({
+            "user_id": user_id,
+            "data": current_data
+        }).execute()
+        return res
+    return _execute(op) is not None

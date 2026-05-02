@@ -39,6 +39,7 @@ export default function AnalysisCard({ userId }: { userId: string }) {
   const [mlStrategy, setMlStrategy] = useState<string | null>(null)
   const [mlConfidence, setMlConfidence] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [warning, setWarning] = useState<string | null>(null)
   const [aiInsight, setAiInsight] = useState<string | null>(null)
   const [insightLoading, setInsightLoading] = useState(false)
 
@@ -95,13 +96,13 @@ export default function AnalysisCard({ userId }: { userId: string }) {
   }, [userId, logs.length])
 
   useEffect(() => {
-    if (logs.length <= 5) return
+    if (logs.length === 0) return
 
     const controller = new AbortController()
 
     const callML = async () => {
       try {
-        // Build a (5, 11) sequence from the last 5 logs using real data
+        if (logs.length < 5) return;
         const recent = logs.slice(-5)
         const sequence = recent.map(l => {
           const sev = (l.severity ?? 0) / 10
@@ -120,33 +121,54 @@ export default function AnalysisCard({ userId }: { userId: string }) {
           ]
         })
 
+        // Data Contract Validation
+        const isValid = sequence.length === 5 && sequence.every(row => row.length === 11 && row.every(val => typeof val === 'number' && Number.isFinite(val)));
+        if (!isValid) return;
+
         const mlApiUrl = process.env.NEXT_PUBLIC_ML_API_URL || 'http://localhost:8000'
 
-        const response = await fetch(`${mlApiUrl}/predict`, {
+        const response = await fetch(`${mlApiUrl}/run`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-api-v2': 'true' },
           body: JSON.stringify({
             user_id: userId,
-            sequence,
-            request_guidance: false,
+            query: "",
+            sequence: sequence,
           }),
           signal: controller.signal
         })
 
-        if (!response.ok) return
+        if (!response.ok) {
+          console.error(`Backend error: ${response.status}`);
+          setError("Prediction currently degraded (connection issue).");
+          return;
+        }
 
-        const data = await response.json()
-        if (typeof data.severity === 'number') {
-          setMlForecast(Number((data.severity * 10).toFixed(2)))
+        const resJson = await response.json()
+        
+        if (resJson?.status === "error") {
+          console.error("ML System error:", resJson?.reason);
+          setError(`Prediction failed: ${resJson?.reason || 'Unknown error'}`);
+          return;
+        } else if (resJson?.status === "degraded") {
+          console.warn("ML System running in degraded mode:", resJson?.reason);
+          setWarning(`System running in degraded mode: ${resJson?.reason || 'Unknown issue'}`);
         }
-        if (data.strategy) {
-          setMlStrategy(data.strategy)
+        
+        const pred = resJson?.data?.prediction
+        
+        if (pred && typeof pred.severity === 'number') {
+          setMlForecast(Number((pred.severity * 10).toFixed(2)))
         }
-        if (typeof data.confidence === 'number') {
-          setMlConfidence(data.confidence)
+        if (pred && pred.strategy) {
+          setMlStrategy(pred.strategy)
         }
-      } catch {
-        // silent fail — ML backend may not be running
+        if (pred && typeof pred.confidence === 'number') {
+          setMlConfidence(pred.confidence)
+        }
+      } catch (err) {
+        console.error("ML Analysis fetch failed:", err)
+        setError("Unable to reach prediction engine.");
       }
     }
 
@@ -246,6 +268,13 @@ export default function AnalysisCard({ userId }: { userId: string }) {
 
   return (
     <div className="space-y-6">
+
+      {warning && (
+        <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs flex items-center justify-between">
+          <span>⚠️ {warning}</span>
+          <button onClick={() => setWarning(null)} className="text-amber-500 hover:text-amber-800">✕</button>
+        </div>
+      )}
 
       {/* View Toggle */}
       <div className="flex gap-2">

@@ -1,7 +1,7 @@
 # user_store.py — ELITE (CLEAN + CONSISTENT + SAFE DATA LAYER)
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone # DEPRECATED: memory logic is now fully DB-based via Supabase.
 from typing import Optional, List, Dict, Any, Tuple
 
 import numpy as np

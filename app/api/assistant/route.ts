@@ -13,57 +13,34 @@ export async function POST(req: Request) {
       })
     }
 
-    const groq = getGroq()
-
-    // Try to build full context, but gracefully degrade if services are unavailable
-    let contextPrompt = ""
-    let retrievedDocs: any[] = []
-
-    try {
-      const { buildAssistantContext } = await import(
-        "@/lib/assistant/contextBuilder"
-      )
-      const { buildPrompt } = await import("@/lib/assistant/promptBuilder")
-
-      const { ml, retrievedDocs: docs, memory, symptomHistory } =
-        await buildAssistantContext(userId, message)
-
-      retrievedDocs = docs
-      contextPrompt = buildPrompt(message, ml, retrievedDocs, memory, symptomHistory)
-    } catch (contextError) {
-      console.warn(
-        "Context building failed, using fallback prompt:",
-        contextError instanceof Error ? contextError.message : contextError
-      )
-
-      // Fallback prompt when Supabase/OpenAI services are unavailable
-      contextPrompt = `You are MenoEaze — a deeply compassionate women's health companion who specializes in menopause and perimenopause. You are the kind of friend every woman wishes she had — someone who truly gets it.
-
-YOUR VOICE:
-- You speak like a real person, not a chatbot. Use contractions. Start sentences with "And" or "But" sometimes. Be human.
-- Mirror the person's emotions BEFORE offering solutions. If they're frustrated, honor that first. If they're scared, sit with that fear before reassuring.
-- Use grounding language: "I hear you", "That makes so much sense", "You're not imagining this."
-- Share wisdom like a gift, not a lecture: "Something that's helped a lot of women is..." or "There's actually some encouraging research on this..."
-- Prioritize natural remedies first (breathing techniques, herbal teas, gentle movement, sleep hygiene, dietary shifts)
-- Keep it to 2-4 SHORT paragraphs. No markdown headers, tables, or long lists. Flowing, warm prose only.
-- Close with something that leaves them feeling seen and less alone
-- Never say "I'm an AI". Never use clinical jargon without explaining it simply.
-- You name the specific emotion you're sensing, not just "I understand"
-
-They said: "${message}"
-
-Respond as MenoEaze. Be the friend she needs right now. Be real. Be warm. Be brief.`
-    }
-
-    const completion = await groq.chat.completions.create({
-      model: "openai/gpt-oss-120b",
-      messages: [{ role: "system", content: contextPrompt }],
-      temperature: 0.72,
-      max_completion_tokens: 1024,
-      top_p: 0.95
+    const mlApiUrl = process.env.NEXT_PUBLIC_ML_API_URL || "http://localhost:8000"
+    
+    // Fetch directly from the backend Python RAG engine
+    const response = await fetch(`${mlApiUrl}/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        query: message,
+      })
     })
 
-    const reply = completion.choices[0].message.content || ""
+    if (!response.ok) {
+      console.error(`Backend returned HTTP ${response.status}`);
+      throw new Error(`Backend returned ${response.status}`)
+    }
+
+    const resJson = await response.json()
+    
+    if (resJson?.status === "error" || resJson?.status === "degraded") {
+      console.error("Backend running in degraded mode or returned error:", resJson?.reason);
+      if (resJson?.status === "error") {
+        throw new Error(resJson?.reason || "Backend processing error");
+      }
+    }
+
+    const reply = resJson?.data?.rag?.answer || "I'm sorry, I couldn't process that right now."
+    const retrievedDocs = resJson?.data?.rag?.docs_used ? [{ text: `Used ${resJson.data.rag.docs_used} docs from backend` }] : []
 
     // Save to chat history (non-blocking, won't fail the response)
     try {

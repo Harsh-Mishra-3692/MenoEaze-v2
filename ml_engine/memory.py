@@ -1,5 +1,6 @@
 # memory.py — ELITE (USER MEMORY MANAGEMENT SYSTEM)
 
+# DEPRECATED: memory logic is now fully DB-based via Supabase.
 import time
 import logging
 from typing import Dict, List, Optional

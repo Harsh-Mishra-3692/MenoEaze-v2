@@ -1,63 +1,54 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+##################################################
+# 🚀 MenoEaze v2 – Production Git Ignore
+##################################################
 
 ############################
-# Dependencies (Node)
+# Node / Next.js
 ############################
-/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
-
-############################
-# Next.js & Build
-############################
+node_modules/
 .next/
 out/
-/build
-.vercel
+build/
+.vercel/
 *.tsbuildinfo
 next-env.d.ts
 
 ############################
-# Environment Variables (STRICT)
+# Python / ML
 ############################
-# Ignore all actual secret files
-.env*
-ml_engine/.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# Whitelist example templates so others know what keys to set
-!.env.example
-!ml_engine/.env.example
-
-############################
-# Python & Virtual Environments (CRITICAL FIX)
-############################
-# Ignore the massive library folders
+# Virtual environments
 .venv/
 venv/
 env/
 ml_engine/.venv/
 ml_engine/venv/
 
-# Ignore bytecode and cache
-__pycache__/
-ml_engine/__pycache__/
-*.pyc
-*.pyo
-*.pyd
-ml_engine/*.pyc
+############################
+# Environment Variables (STRICT)
+############################
+.env
+.env.*
+.env.local
+ml_engine/.env
+
+# Allow only templates
+!.env.example
+!ml_engine/.env.example
 
 ############################
-# ML Models & Databases
+# Data (CRITICAL – NEVER PUSH)
 ############################
-# Ignore local vector database (contains user data)
-ml_engine/chroma_db/
+data/
+ml_engine/data/
 
-# Ignore all model weights by default
+############################
+# ML Artifacts / Models (STRICT)
+############################
 *.pt
 *.pth
 *.onnx
@@ -65,27 +56,48 @@ ml_engine/chroma_db/
 *.pkl
 *.joblib
 
-# Whitelist ONLY the production base models required to run the app
-!ml_engine/model.pt
-!ml_engine/scalers.pt
+############################
+# Vector DB / User Data
+############################
+ml_engine/chroma_db/
 
 ############################
-# Logs, Security & OS
+# Logs
 ############################
 *.log
 npm-debug.log*
 yarn-debug.log*
+
+############################
+# OS / System
+############################
 .DS_Store
 Thumbs.db
+
+############################
+# Security
+############################
 *.pem
 *.key
 *.crt
 
 ############################
-# IDE & Misc
+# IDE / Editor
 ############################
 .vscode/
 .idea/
 *.swp
 .cache/
 *.tmp
+
+############################
+# Optional (large artifacts)
+############################
+*.png
+*.jpg
+*.jpeg
+*.csv
+
+##################################################
+# ✅ END
+##################################################

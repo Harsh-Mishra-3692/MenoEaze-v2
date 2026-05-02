@@ -1,0 +1,8 @@
+{
+  "timestamp": "2026-05-02T05:43:56.377887+00:00",
+  "best_val_loss": 0.003679768880829215,
+  "epochs": 30,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "device": "cpu"
+}

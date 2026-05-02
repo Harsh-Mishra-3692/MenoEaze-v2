@@ -280,9 +280,27 @@ def full_pipeline(
             pred_reason = pred_res.get("reason", "")
             severity = pred_out.get("severity", 0.5)
 
+        symptoms = {}
+        if user_history:
+            recent_preds = [p for p in user_history.get("predictions", []) if p is not None]
+            if recent_preds:
+                symptoms["historical_severity"] = sum(recent_preds) / len(recent_preds)
+                symptoms["trend"] = "increasing" if recent_preds[-1] > symptoms["historical_severity"] else "stable"
+                
+        if sequence is not None and len(sequence) > 0:
+            last_log = sequence[-1]
+            if len(last_log) >= 6:
+                symptoms["hot_flashes"] = last_log[0]
+                symptoms["night_sweats"] = last_log[1]
+                symptoms["poor_sleep"] = 1.0 - last_log[2] # Inverted: higher is worse
+                symptoms["low_mood"] = 1.0 - last_log[3]
+                symptoms["fatigue"] = last_log[4]
+                symptoms["anxiety"] = last_log[5]
+
         rag_res = rag_pipeline(
             query=query,
             severity=severity,
+            symptoms=symptoms,
             use_reranker=use_reranker,
             return_debug=return_debug
         )
