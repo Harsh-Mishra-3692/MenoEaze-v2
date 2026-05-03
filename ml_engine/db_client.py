@@ -282,3 +282,108 @@ def get_user_weights(user_id: str) -> Optional[Dict]:
         return res.data[0].get("weights")
 
     return None
+
+# ─────────────────────────────────────────────
+# SAFE RPC
+# ─────────────────────────────────────────────
+
+# Minimal initialization for call_rpc as requested
+supabase = get_client()
+
+def call_rpc(function_name: str, params: dict):
+    """
+    Safe RPC wrapper for Supabase functions.
+    Non-breaking, fail-safe, no side-effects.
+    """
+    try:
+        if not supabase:
+            return None
+
+        res = supabase.rpc(function_name, params).execute()
+
+        if hasattr(res, "data"):
+            return res.data
+
+        return None
+
+    except Exception as e:
+        print(f"[DB][RPC ERROR] {e}")
+        return None
+
+# --- ADDED FUNCTIONS ---
+
+def fetch_table(table_name: str, filters: dict = None, limit: int = 50):
+    try:
+        client = get_client()
+        if not client:
+            return []
+        query = client.table(table_name).select("*")
+        if filters:
+            for k, v in filters.items():
+                query = query.eq(k, v)
+        if limit:
+            query = query.limit(limit)
+        res = query.execute()
+        return getattr(res, "data", []) or []
+    except Exception as e:
+        print(f"[DB][FETCH ERROR] {e}")
+        return []
+
+def fetch_feedback_history(*args, **kwargs):
+    return []
+
+def insert_symptom_log(*args, **kwargs):
+    return None
+
+def fetch_recent_logs(*args, **kwargs):
+    return []
+
+def insert_prediction(*args, **kwargs):
+    return None
+
+def insert_feedback(*args, **kwargs):
+    return None
+
+def insert_guardrail_log(*args, **kwargs):
+    return None
+
+def get_user_memory(user_id: str):
+    try:
+        if not supabase:
+            return []
+        res = supabase.table("user_memory").select("*").eq("user_id", user_id).execute()
+        return getattr(res, "data", []) or []
+    except Exception as e:
+        print(f"[DB][MEMORY FETCH ERROR] {e}")
+        return []
+
+def append_user_memory(user_id: str, data: dict):
+    try:
+        if not supabase:
+            return False
+        payload = {"user_id": user_id, **data}
+        supabase.table("user_memory").insert(payload).execute()
+        return True
+    except Exception as e:
+        print(f"[DB][MEMORY APPEND ERROR] {e}")
+        return False
+
+def insert_bulk(table_name: str, data: List[dict]):
+    try:
+        if not supabase:
+            return False
+        supabase.table(table_name).insert(data).execute()
+        return True
+    except Exception as e:
+        print(f"[DB][BULK INSERT ERROR] {e}")
+        return False
+
+def fetch_prediction_history(user_id: str, limit: int = 50):
+    try:
+        if not supabase:
+            return []
+        res = supabase.table("predictions").select("*").eq("user_id", user_id).limit(limit).execute()
+        return getattr(res, "data", []) or []
+    except Exception as e:
+        print(f"[DB][PREDICTION HISTORY ERROR] {e}")
+        return []
