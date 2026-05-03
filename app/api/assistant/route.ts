@@ -1,59 +1,144 @@
+// code file of route.ts
+
 import { NextResponse } from "next/server"
+
+const DEFAULT_BACKEND = "http://localhost:8000"
+const REQUEST_TIMEOUT_MS = 15000
+
+function sanitizeUrl(url: string) {
+  return url.replace(/\/+$/, "") // remove trailing slashes
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit, timeout = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const id = setTimeout(() => controller.abort(), timeout)
+
+  try {
+    const res = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    })
+    return res
+  } finally {
+    clearTimeout(id)
+  }
+}
 
 export async function POST(req: Request) {
   try {
-    const { userId, message } = await req.json()
-
-    if (!userId || !message) {
+    // ---------- INPUT PARSING ----------
+    let body
+    try {
+      body = await req.json()
+    } catch {
       return NextResponse.json(
-        { reply: "Missing user ID or message." },
+        { reply: "Invalid JSON request body." },
         { status: 400 }
       )
     }
 
-    const mlApiUrl = process.env.NEXT_PUBLIC_ML_API_URL || "http://localhost:8000"
-    
-    // STRICT /run PROXY
-    // Format: { user_id, action: "predict", payload: { symptoms } }
-    const response = await fetch(`${mlApiUrl}/run`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_id: userId,
-        action: "predict",
-        payload: {
-          symptoms: message
-        }
-      })
-    })
+    const { userId, message } = body || {}
 
+    if (!userId || !message || typeof message !== "string") {
+      return NextResponse.json(
+        { reply: "Missing or invalid user ID / message." },
+        { status: 400 }
+      )
+    }
+
+    // ---------- BACKEND URL ----------
+    const rawUrl = process.env.NEXT_PUBLIC_ML_API_URL || DEFAULT_BACKEND
+    const baseUrl = sanitizeUrl(rawUrl)
+
+    const endpoint = `${baseUrl}/run`
+
+    // ---------- REQUEST ----------
+    let response: Response
+
+    try {
+      response = await fetchWithTimeout(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "predict",
+          payload: {
+            user_id: userId,
+            symptoms: message,
+          },
+        }),
+      })
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        throw new Error("Backend timeout")
+      }
+      throw new Error("Backend unreachable")
+    }
+
+    // ---------- STATUS CHECK ----------
     if (!response.ok) {
-      console.error(`Backend returned HTTP ${response.status}`)
+      console.error(`[Assistant API] Backend error ${response.status}`)
       throw new Error(`Backend returned ${response.status}`)
     }
 
-    const resJson = await response.json()
-    
-    // Strictly handle schema
-    if (resJson?.status === "error" || resJson?.status === "degraded") {
-      console.error("Backend running in degraded mode or returned error:", resJson?.reason)
-      if (resJson?.status === "error") {
-        throw new Error(resJson?.reason || "Backend processing error")
-      }
+    // ---------- SAFE JSON PARSE ----------
+    let resJson: any
+    try {
+      resJson = await response.json()
+    } catch {
+      throw new Error("Invalid backend response format")
     }
 
-    const reply = resJson?.rag?.answer || "I'm sorry, I couldn't process that right now."
-    const citations = resJson?.rag?.sources || []
-    const degradedReasons = (resJson?.status === 'degraded' && Array.isArray(resJson?.reasons))
-      ? resJson.reasons
+    // ---------- SCHEMA GUARD ----------
+    if (!resJson || typeof resJson !== "object") {
+      throw new Error("Malformed backend response")
+    }
+
+    // ---------- DEGRADED / ERROR HANDLING ----------
+    if (resJson.status === "error") {
+      console.error("[Assistant API] Backend error:", resJson.reason)
+      throw new Error(resJson.reason || "Processing error")
+    }
+
+    if (resJson.status === "degraded") {
+      console.warn("[Assistant API] Degraded mode:", resJson.reasons)
+    }
+
+    // ---------- RESPONSE EXTRACTION ----------
+    const reply =
+      resJson?.rag?.answer ||
+      resJson?.response ||
+      "I'm sorry, I couldn't process that right now."
+
+    const citations = Array.isArray(resJson?.rag?.sources)
+      ? resJson.rag.sources
       : []
 
-    return NextResponse.json({ reply, citations, degradedReasons })
-  } catch (error) {
-    console.error("Assistant API error:", error)
-    const message = error instanceof Error ? error.message : "Unknown error"
+    const degradedReasons =
+      resJson?.status === "degraded" && Array.isArray(resJson?.reasons)
+        ? resJson.reasons
+        : []
+
+    return NextResponse.json({
+      reply,
+      citations,
+      degradedReasons,
+    })
+
+  } catch (error: any) {
+    console.error("[Assistant API] Fatal error:", error)
+
+    const message =
+      error?.message || "Unexpected error occurred"
+
     return NextResponse.json(
-      { reply: `I'm having trouble connecting right now. Please try again in a moment. (${message})` },
+      {
+        reply:
+          "I'm having trouble connecting right now. Please try again in a moment. (" +
+          message +
+          ")",
+      },
       { status: 500 }
     )
   }

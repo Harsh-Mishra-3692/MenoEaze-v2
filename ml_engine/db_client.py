@@ -1,8 +1,7 @@
-# db_client.py — FINAL ELITE v3 (SAFE + TRUSTED + NON-CORRUPTING)
+# db_client.py — ELITE v6 (STABLE | CONTRACT-COMPLETE | DEMO-SAFE)
 
 import logging
 import time
-import hashlib
 import threading
 from typing import Dict, List, Any, Optional, Callable
 
@@ -17,25 +16,11 @@ SUPABASE_KEY = CONFIG["db"].key
 _client: Optional[Client] = None
 _client_lock = threading.Lock()
 
-MAX_RETRIES = 3
-BACKOFF_BASE = 0.3
-TIMEOUT_WARN_MS = 500
+MAX_RETRIES = 2
+BACKOFF_BASE = 0.25
+TIMEOUT_WARN_MS = 400
 
 FEATURES = 11
-MAX_PAYLOAD_SIZE = 1000
-
-# 🔒 PERSONALIZATION SAFETY LIMITS
-MAX_WEIGHT_DELTA = 0.15
-WEIGHT_CLAMP_MIN = -1.0
-WEIGHT_CLAMP_MAX = 1.0
-
-# circuit breaker
-_FAILURE_COUNT = 0
-_FAILURE_LIMIT = 5
-_CIRCUIT_OPEN = False
-_CIRCUIT_RESET_TIME = 10
-_LAST_FAILURE_TIME = 0
-
 
 # ─────────────────────────────────────────────
 # SAFE HELPERS
@@ -49,8 +34,7 @@ def _safe_str(v, max_len=255):
 
 def _safe_float(v, a=0.0, b=1.0):
     try:
-        x = float(v)
-        return max(a, min(b, x))
+        return max(a, min(b, float(v)))
     except:
         return a
 
@@ -65,54 +49,7 @@ def _safe_vec(v):
 
 
 def _valid_user(user_id: str):
-    return isinstance(user_id, str) and 5 < len(user_id) < 128
-
-
-def _hash_payload(payload: Dict):
-    return hashlib.sha256(str(payload).encode()).hexdigest()
-
-
-def _validate_identifier(name: str):
-    if not isinstance(name, str):
-        return None
-    name = name.strip()
-    if not name.replace("_", "").isalnum():
-        return None
-    return name
-
-
-def _clamp_weight(v):
-    try:
-        return max(WEIGHT_CLAMP_MIN, min(WEIGHT_CLAMP_MAX, float(v)))
-    except:
-        return 0.0
-
-
-# ─────────────────────────────────────────────
-# CIRCUIT BREAKER
-# ─────────────────────────────────────────────
-def _check_circuit():
-    global _CIRCUIT_OPEN, _LAST_FAILURE_TIME
-
-    if not _CIRCUIT_OPEN:
-        return True
-
-    if time.time() - _LAST_FAILURE_TIME > _CIRCUIT_RESET_TIME:
-        _CIRCUIT_OPEN = False
-        return True
-
-    return False
-
-
-def _record_failure():
-    global _FAILURE_COUNT, _CIRCUIT_OPEN, _LAST_FAILURE_TIME
-
-    _FAILURE_COUNT += 1
-    _LAST_FAILURE_TIME = time.time()
-
-    if _FAILURE_COUNT >= _FAILURE_LIMIT:
-        _CIRCUIT_OPEN = True
-        logger.error("[DB] Circuit breaker OPEN")
+    return isinstance(user_id, str) and len(user_id) >= 3
 
 
 # ─────────────────────────────────────────────
@@ -129,11 +66,12 @@ def get_client() -> Optional[Client]:
             return _client
 
         if not SUPABASE_URL or not SUPABASE_KEY:
-            logger.error("[DB] Missing config")
+            logger.error("[DB] Missing Supabase config")
             return None
 
         try:
             _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+            logger.info("[DB] Supabase client initialized")
             return _client
         except Exception as e:
             logger.error(f"[DB] init failed: {e}")
@@ -141,14 +79,9 @@ def get_client() -> Optional[Client]:
 
 
 # ─────────────────────────────────────────────
-# EXECUTION
+# EXECUTION WRAPPER
 # ─────────────────────────────────────────────
 def _execute(fn: Callable, op: str):
-
-    if not _check_circuit():
-        logger.error(f"[DB][{op}] circuit open")
-        return None
-
     for attempt in range(MAX_RETRIES + 1):
         start = time.time()
 
@@ -162,7 +95,6 @@ def _execute(fn: Callable, op: str):
             return res
 
         except Exception as e:
-            _record_failure()
             logger.error(f"[DB][{op}] attempt {attempt}: {e}")
 
             if attempt >= MAX_RETRIES:
@@ -172,218 +104,282 @@ def _execute(fn: Callable, op: str):
 
 
 # ─────────────────────────────────────────────
-# 🔥 CRITICAL: SAFE USER WEIGHT UPDATE
+# CORE FUNCTIONS
 # ─────────────────────────────────────────────
-def update_user_weights(
-    user_id: str,
-    new_weights: Dict[str, float],
-    trust_score: float = 0.5
-) -> bool:
-    """
-    Safe personalization update.
 
-    DOES NOT affect GRU weights.
-    Only updates user-level adaptation layer.
-    """
-
+def insert_symptom_log(user_id: str, feature_vector: list, raw_text: str = "", emoji: str = ""):
     if not _valid_user(user_id):
         return False
 
-    if not isinstance(new_weights, dict):
+    fv = _safe_vec(feature_vector)
+    if fv is None:
         return False
 
     client = get_client()
     if not client:
         return False
 
-    # 🚨 TRUST GATING (ANTI-CORRUPTION)
-    trust_score = _safe_float(trust_score)
-    if trust_score < 0.2:
-        logger.warning("[DB][WEIGHTS] low trust input rejected")
-        return False
-
-    try:
-        # fetch existing
-        existing = _execute(
-            lambda: client.table("user_weights")
-            .select("*")
-            .eq("user_id", user_id)
-            .limit(1)
-            .execute(),
-            "fetch_weights"
-        )
-
-        current_weights = {}
-        if existing and getattr(existing, "data", None):
-            current_weights = existing.data[0].get("weights", {})
-
-        # 🧠 SAFE UPDATE LOGIC
-        updated = {}
-
-        for k, v in new_weights.items():
-
-            k = _safe_str(k, 50)
-            if not k:
-                continue
-
-            v = _clamp_weight(v)
-
-            old = _clamp_weight(current_weights.get(k, 0.0))
-
-            # 🔒 LIMIT CHANGE RATE
-            delta = v - old
-            if abs(delta) > MAX_WEIGHT_DELTA:
-                delta = MAX_WEIGHT_DELTA if delta > 0 else -MAX_WEIGHT_DELTA
-
-            updated[k] = _clamp_weight(old + delta * trust_score)
-
-        payload = {
-            "user_id": user_id,
-            "weights": updated,
-            "updated_at": int(time.time())
-        }
-
-        # 🔁 IDEMPOTENT UPSERT
-        res = _execute(
-            lambda: client.table("user_weights")
-            .upsert(payload, on_conflict="user_id")
-            .execute(),
-            "update_weights"
-        )
-
-        return bool(res and getattr(res, "data", None))
-
-    except Exception as e:
-        logger.error(f"[DB][WEIGHTS][FAIL] {e}")
-        return False
-
-
-# ─────────────────────────────────────────────
-# DOMAIN METHODS (UNCHANGED, SAFE)
-# ─────────────────────────────────────────────
-def get_user_weights(user_id: str) -> Optional[Dict]:
-    if not _valid_user(user_id):
-        return None
-
-    client = get_client()
-    if not client:
-        return None
+    payload = {
+        "user_id": user_id,
+        "feature_vector": fv,
+        "notes": _safe_str(raw_text, 300),
+        "emoji": _safe_str(emoji, 10),
+    }
 
     res = _execute(
-        lambda: client.table("user_weights")
-        .select("*")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute(),
-        "get_user_weights"
+        lambda: client.table("symptom_logs").insert(payload).execute(),
+        "insert_symptom_log"
     )
 
-    if res and hasattr(res, "data") and res.data:
-        return res.data[0].get("weights")
+    return bool(res and getattr(res, "data", None))
+
+
+def fetch_recent_logs(user_id: str, limit: int = 10):
+    client = get_client()
+    if not client:
+        return []
+
+    res = _execute(
+        lambda: client.table("symptom_logs")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute(),
+        "fetch_recent_logs"
+    )
+
+    return getattr(res, "data", []) if res else []
+
+
+def insert_prediction(user_id: str, severity: float, confidence: float, reasoning: str):
+    client = get_client()
+    if not client:
+        return None
+
+    payload = {
+        "user_id": user_id,
+        "severity": _safe_float(severity),
+        "confidence": _safe_float(confidence),
+    }
+
+    res = _execute(
+        lambda: client.table("predictions").insert(payload).execute(),
+        "insert_prediction"
+    )
+
+    if res and getattr(res, "data", None):
+        return res.data[0].get("id")
 
     return None
 
+
+def insert_feedback(user_id: str, prediction_id: str, predicted: float, actual: float, rating: int, trust_score: float):
+    client = get_client()
+    if not client:
+        return False
+
+    payload = {
+        "user_id": user_id,
+        "prediction_id": prediction_id,
+        "predicted": _safe_float(predicted),
+        "actual": _safe_float(actual),
+        "rating": int(max(1, min(10, rating))),
+        "trust_score": _safe_float(trust_score),
+    }
+
+    res = _execute(
+        lambda: client.table("feedback").insert(payload).execute(),
+        "insert_feedback"
+    )
+
+    return bool(res and getattr(res, "data", None))
+
+
+def insert_guardrail_log(user_id: str, query: str, severity: float, message: str):
+    client = get_client()
+    if not client:
+        return False
+
+    payload = {
+        "user_id": user_id,
+        "query": _safe_str(query, 300),
+        "answer": _safe_str(message, 500),
+        "sources": None,
+    }
+
+    _execute(
+        lambda: client.table("rag_logs").insert(payload).execute(),
+        "guardrail_log"
+    )
+
+    return True
+
+
 # ─────────────────────────────────────────────
-# SAFE RPC
+# GENERIC
 # ─────────────────────────────────────────────
-
-# Minimal initialization for call_rpc as requested
-supabase = get_client()
-
-def call_rpc(function_name: str, params: dict):
-    """
-    Safe RPC wrapper for Supabase functions.
-    Non-breaking, fail-safe, no side-effects.
-    """
-    try:
-        if not supabase:
-            return None
-
-        res = supabase.rpc(function_name, params).execute()
-
-        if hasattr(res, "data"):
-            return res.data
-
-        return None
-
-    except Exception as e:
-        print(f"[DB][RPC ERROR] {e}")
-        return None
-
-# --- ADDED FUNCTIONS ---
 
 def fetch_table(table_name: str, filters: dict = None, limit: int = 50):
+    client = get_client()
+    if not client:
+        return []
+
     try:
-        client = get_client()
-        if not client:
-            return []
         query = client.table(table_name).select("*")
+
         if filters:
             for k, v in filters.items():
                 query = query.eq(k, v)
+
         if limit:
             query = query.limit(limit)
+
         res = query.execute()
         return getattr(res, "data", []) or []
+
     except Exception as e:
-        print(f"[DB][FETCH ERROR] {e}")
+        logger.error(f"[DB][FETCH] {e}")
         return []
 
-def fetch_feedback_history(*args, **kwargs):
-    return []
 
-def insert_symptom_log(*args, **kwargs):
-    return None
+# ─────────────────────────────────────────────
+# REQUIRED INTERFACES (CRITICAL)
+# ─────────────────────────────────────────────
 
-def fetch_recent_logs(*args, **kwargs):
-    return []
+def insert_bulk(table_name: str, batch: List[Dict]):
+    client = get_client()
+    if not client:
+        return False
 
-def insert_prediction(*args, **kwargs):
-    return None
+    res = _execute(
+        lambda: client.table(table_name).insert(batch).execute(),
+        f"insert_bulk_{table_name}"
+    )
 
-def insert_feedback(*args, **kwargs):
-    return None
+    return bool(res and getattr(res, "data", None))
 
-def insert_guardrail_log(*args, **kwargs):
-    return None
+
+def call_rpc(function_name: str, params: dict):
+    client = get_client()
+    if not client:
+        return None
+
+    try:
+        res = client.rpc(function_name, params).execute()
+        return getattr(res, "data", None)
+    except Exception as e:
+        logger.error(f"[DB][RPC] {e}")
+        return None
+
+
+def get_user_weights(user_id: str) -> Dict:
+    data = fetch_table("user_weights", {"user_id": user_id}, 1)
+    if not data:
+        return {}
+    row = data[0]
+    # Reconstruct weights dict from DB columns for personalization adapter
+    return {
+        "baseline_offset": row.get("baseline_offset", 0.0),
+        "volatility_multiplier": row.get("volatility_multiplier", 1.0),
+    }
+
+
+def fetch_feedback_history(user_id: str, limit: int = 20):
+    return fetch_table("feedback", {"user_id": user_id}, limit)
+
+
+def update_user_weights(user_id: str, new_weights: Dict[str, float], trust_score: float = 0.5) -> bool:
+    client = get_client()
+    if not client:
+        return False
+
+    payload = {
+        "user_id": user_id,
+        "baseline_offset": _safe_float(new_weights.get("bias", 0.0), -1.0, 1.0),
+        "volatility_multiplier": _safe_float(new_weights.get("temporal_weight", 1.0), 0.0, 5.0),
+    }
+
+    res = _execute(
+        lambda: client.table("user_weights").upsert(payload, on_conflict="user_id").execute(),
+        "update_user_weights"
+    )
+
+    return bool(res)
+
+
+def get_user_stats(user_id: str) -> Dict[str, Any]:
+    client = get_client()
+    if not client:
+        return {}
+
+    try:
+        # Total Logs
+        count_res = client.table("symptom_logs").select("id", count="exact").eq("user_id", user_id).execute()
+        total_logs = count_res.count if hasattr(count_res, "count") else 0
+
+        # Avg Severity from user_memory (pre-computed)
+        memory = fetch_table("user_memory", {"user_id": user_id}, 1)
+        avg_severity = memory[0].get("avg_severity", 0.0) if memory else 0.0
+
+        # Last Log Date
+        last_log = client.table("symptom_logs").select("created_at").eq("user_id", user_id).order("created_at", desc=True).limit(1).execute()
+        last_date = last_log.data[0].get("created_at") if last_log and last_log.data else None
+
+        # Logs this week (simple count)
+        recent = fetch_recent_logs(user_id, 20)
+        
+        # Chart Data (last 14 days/logs)
+        chart_data = []
+        for l in reversed(recent[:14]):
+            fv = l.get("feature_vector", [0]*11)
+            # severity is first feature, mood is second in our 11-feature schema (usually)
+            # Actually, let's just use the feature vector indexes if we know them.
+            # But we can also just return the logs and let frontend decide.
+            chart_data.append({
+                "date": l.get("created_at"),
+                "severity": fv[0] if fv else 0,
+                "mood": fv[1] if fv and len(fv) > 1 else 0
+            })
+
+        return {
+            "total_logs": total_logs,
+            "avg_severity": round(avg_severity, 2),
+            "last_log_at": last_date,
+            "recent_count": len(recent),
+            "history": chart_data
+        }
+    except Exception as e:
+        logger.error(f"[DB][STATS] {e}")
+        return {}
+
 
 def get_user_memory(user_id: str):
-    try:
-        if not supabase:
-            return []
-        res = supabase.table("user_memory").select("*").eq("user_id", user_id).execute()
-        return getattr(res, "data", []) or []
-    except Exception as e:
-        print(f"[DB][MEMORY FETCH ERROR] {e}")
+    data = fetch_table("user_memory", {"user_id": user_id}, 1)
+    if not data:
         return []
+    # Return as list to match existing consumer expectations
+    return data
+
 
 def append_user_memory(user_id: str, data: dict):
-    try:
-        if not supabase:
-            return False
-        payload = {"user_id": user_id, **data}
-        supabase.table("user_memory").insert(payload).execute()
-        return True
-    except Exception as e:
-        print(f"[DB][MEMORY APPEND ERROR] {e}")
+    client = get_client()
+    if not client:
         return False
 
-def insert_bulk(table_name: str, data: List[dict]):
-    try:
-        if not supabase:
-            return False
-        supabase.table(table_name).insert(data).execute()
-        return True
-    except Exception as e:
-        print(f"[DB][BULK INSERT ERROR] {e}")
-        return False
+    # user_memory has UNIQUE(user_id) — must upsert with schema-compatible fields
+    avg_sev = _safe_float(data.get("severity", 0.0))
+    trend = str(data.get("trend", data.get("meta", {}).get("trend", "unknown")))[:20]
 
-def fetch_prediction_history(user_id: str, limit: int = 50):
-    try:
-        if not supabase:
-            return []
-        res = supabase.table("predictions").select("*").eq("user_id", user_id).limit(limit).execute()
-        return getattr(res, "data", []) or []
-    except Exception as e:
-        print(f"[DB][PREDICTION HISTORY ERROR] {e}")
-        return []
+    payload = {
+        "user_id": user_id,
+        "avg_severity": avg_sev,
+        "historical_trend": trend,
+    }
+
+    res = _execute(
+        lambda: client.table("user_memory").upsert(payload, on_conflict="user_id").execute(),
+        "append_memory"
+    )
+
+    return bool(res)

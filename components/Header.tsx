@@ -27,8 +27,8 @@ export default function Header() {
 
   const navClass = (path: string) =>
     `px-3 py-2 rounded-lg text-sm font-medium transition ${isActive(path)
-      ? 'text-purple-600 bg-purple-50'
-      : 'text-gray-700 hover:text-purple-600'
+      ? 'text-teal-600 bg-teal-50'
+      : 'text-gray-700 hover:text-teal-600'
     }`
 
   useEffect(() => {
@@ -67,8 +67,8 @@ export default function Header() {
         <nav className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
 
           <Link href="/" className="flex items-center gap-2">
-            ❤️
-            <span className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-pink-500 bg-clip-text text-transparent">
+            🌿
+            <span className="text-2xl font-bold bg-gradient-to-r from-teal-600 to-rose-500 bg-clip-text text-transparent">
               MenoEaze
             </span>
           </Link>
@@ -84,13 +84,13 @@ export default function Header() {
                 </Link>
 
                 <Link href="/assistant" className={`${navClass('/assistant')} flex items-center gap-1`}>
-                  <Bot size={16} className="text-purple-500 animate-pulse" />
+                  <Bot size={16} className="text-teal-500 animate-pulse" />
                   AI Assistant
                 </Link>
 
                 <button
                   onClick={() => setLogOpen(true)}
-                  className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold hover:shadow-md transition"
+                  className="bg-gradient-to-r from-teal-600 to-rose-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold hover:shadow-md transition"
                 >
                   + Log Symptom
                 </button>
@@ -103,7 +103,7 @@ export default function Header() {
               <div className="relative ml-4" ref={dropdownRef}>
                 <button
                   onClick={() => setDropdownOpen(p => !p)}
-                  className="w-[44px] h-[44px] rounded-full bg-gradient-to-r from-purple-600 to-pink-500 text-white flex items-center justify-center font-semibold text-sm"
+                  className="w-[44px] h-[44px] rounded-full bg-gradient-to-r from-teal-600 to-rose-500 text-white flex items-center justify-center font-semibold text-sm"
                 >
                   {userInitial}
                 </button>
@@ -145,7 +145,7 @@ export default function Header() {
                     setAuthMode('signup')
                     setAuthOpen(true)
                   }}
-                  className="bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold"
+                  className="bg-gradient-to-r from-teal-600 to-rose-500 text-white px-4 py-2 min-h-[44px] flex items-center justify-center rounded-lg text-sm font-semibold"
                 >
                   Get Started
                 </button>

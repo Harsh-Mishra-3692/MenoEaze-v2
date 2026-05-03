@@ -51,7 +51,7 @@ ml_engine/data/
 ############################
 # ML Artifacts / Models (STRICT)
 ############################
-*.pt
+
 *.pth
 *.onnx
 *.h5

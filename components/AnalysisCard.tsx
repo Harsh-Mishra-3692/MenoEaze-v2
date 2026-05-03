@@ -119,9 +119,9 @@ export default function AnalysisCard({ userId, onDoctorUrgency }: Props) {
 
       {/* Header + Button */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
-        <h3 className="text-lg font-semibold text-gray-800">Health Analysis</h3>
+        <h3 className="text-lg font-semibold text-slate-800">Health Analysis</h3>
         <button onClick={handleRunAnalysis} disabled={loading}
-          className="w-full sm:w-auto bg-gradient-to-r from-purple-600 to-pink-500 hover:from-purple-700 hover:to-pink-600 text-white px-5 py-2.5 min-h-[44px] rounded-xl text-sm font-semibold disabled:opacity-50 transition-all shadow-sm hover:shadow-md">
+          className="w-full sm:w-auto bg-gradient-to-r from-teal-600 to-teal-500 hover:from-teal-700 hover:to-teal-600 text-white px-5 py-2.5 min-h-[44px] rounded-xl text-sm font-semibold disabled:opacity-50 transition-all shadow-sm hover:shadow-md">
           {loading ? 'Analyzing…' : '✨ Run Analysis'}
         </button>
       </div>
@@ -194,7 +194,7 @@ export default function AnalysisCard({ userId, onDoctorUrgency }: Props) {
 
           {/* RAG Answer */}
           {answer && (
-            <div className="text-sm bg-purple-50/50 p-4 rounded-xl border border-purple-100 leading-relaxed text-gray-700">
+            <div className="text-sm bg-teal-50/50 p-4 rounded-xl border border-teal-100 leading-relaxed text-slate-700">
               {answer}
             </div>
           )}
@@ -225,7 +225,7 @@ export default function AnalysisCard({ userId, onDoctorUrgency }: Props) {
 
           {/* Reasoning Toggle */}
           <button onClick={() => setShowReasoning(!showReasoning)}
-            className="text-xs text-purple-600 hover:text-purple-700 font-medium transition">
+            className="text-xs text-teal-600 hover:text-teal-700 font-medium transition">
             {showReasoning ? '▾ Hide reasoning details' : '▸ Show reasoning details'}
           </button>
 

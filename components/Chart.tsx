@@ -86,9 +86,9 @@ export default function Chart({
               yAxisId="left"
               type="monotone"
               dataKey="severity"
-              stroke="#9333ea"
-              strokeWidth={2}
-              dot={{ r: 3 }}
+              stroke="#0d9488"
+              strokeWidth={3}
+              dot={{ r: 4, fill: '#0d9488' }}
               name="Severity"
             />
 
@@ -97,9 +97,9 @@ export default function Chart({
               yAxisId="right"
               type="monotone"
               dataKey="mood"
-              stroke="#10b981"
+              stroke="#64748b"
               strokeWidth={2}
-              dot={{ r: 3 }}
+              dot={{ r: 3, fill: '#64748b' }}
               name="Mood"
             />
 
@@ -108,10 +108,11 @@ export default function Chart({
               yAxisId="left"
               type="monotone"
               dataKey="smoothed"
-              stroke="#ec4899"
+              stroke="#fb7185"
               strokeWidth={2}
               dot={false}
-              name="7-Day Moving Avg"
+              strokeDasharray="5 5"
+              name="Trend Line"
             />
 
             {/* Forecast Dot */}

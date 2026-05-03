@@ -14,6 +14,7 @@ import {
     Sun,
     Sparkles
 } from 'lucide-react'
+import Chart from '@/components/Chart'
 
 const fadeUp = {
     hidden: { opacity: 0, y: 20 },
@@ -36,6 +37,7 @@ export default function DashboardPage() {
         lastLogged: '',
         weekly: 0
     })
+    const [history, setHistory] = useState<any[]>([])
 
     useEffect(() => {
         supabase.auth.getUser().then(({ data }) => {
@@ -68,9 +70,22 @@ export default function DashboardPage() {
     }
 
     async function fetchStats() {
-        // DISABLED: Architectural constraint - Frontend MUST NOT query Supabase directly
-        // Future: Backend /run endpoint will return stats natively.
-        setStats({ total: 0, avgSeverity: 0, lastLogged: '—', weekly: 0 })
+        try {
+            const { getUserStats } = await import('@/lib/mlClient')
+            const data = await getUserStats()
+            if (data) {
+                setStats({
+                    total: data.total_logs || 0,
+                    avgSeverity: data.avg_severity || 0,
+                    lastLogged: data.last_log_at ? new Date(data.last_log_at).toLocaleDateString() : '—',
+                    weekly: data.recent_count || 0
+                })
+                setHistory(data.history || [])
+            }
+        } catch (error) {
+            console.error('Failed to fetch stats:', error)
+            setStats({ total: 0, avgSeverity: 0, lastLogged: '—', weekly: 0 })
+        }
     }
 
     const greeting = () => {
@@ -81,12 +96,12 @@ export default function DashboardPage() {
     }
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-rose-50/80 via-purple-50/50 to-pink-50/60 relative overflow-hidden">
+        <div className="min-h-screen bg-gradient-to-br from-teal-50/80 via-slate-50/50 to-rose-50/60 relative overflow-hidden">
             {/* Ambient blobs */}
             <div className="fixed inset-0 pointer-events-none overflow-hidden">
-                <div className="absolute top-[-15%] right-[-5%] w-[500px] h-[500px] rounded-full bg-purple-200/30 blur-[100px] animate-[drift_22s_ease-in-out_infinite_alternate]" />
-                <div className="absolute bottom-[-10%] left-[-5%] w-[400px] h-[400px] rounded-full bg-pink-200/30 blur-[100px] animate-[drift_28s_ease-in-out_infinite_alternate-reverse]" />
-                <div className="absolute top-[50%] left-[40%] w-[350px] h-[350px] rounded-full bg-rose-200/20 blur-[100px] animate-[drift_30s_ease-in-out_infinite_alternate]" />
+                <div className="absolute top-[-15%] right-[-5%] w-[500px] h-[500px] rounded-full bg-teal-200/30 blur-[100px] animate-[drift_22s_ease-in-out_infinite_alternate]" />
+                <div className="absolute bottom-[-10%] left-[-5%] w-[400px] h-[400px] rounded-full bg-rose-200/30 blur-[100px] animate-[drift_28s_ease-in-out_infinite_alternate-reverse]" />
+                <div className="absolute top-[50%] left-[40%] w-[350px] h-[350px] rounded-full bg-slate-200/20 blur-[100px] animate-[drift_30s_ease-in-out_infinite_alternate]" />
             </div>
 
             {/* Username Prompt Modal */}
@@ -225,6 +240,13 @@ export default function DashboardPage() {
                                     Your Insights
                                 </h2>
                             </div>
+                            
+                            {history && history.length > 0 && (
+                                <div className="mb-8">
+                                    <Chart data={history} view="weekly" />
+                                </div>
+                            )}
+
                             {userId ? (
                                 <AnalysisCard userId={userId} key={stats.lastLogged || Date.now()} />
                             ) : (

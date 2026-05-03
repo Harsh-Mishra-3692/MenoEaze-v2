@@ -111,6 +111,22 @@ async function getAuthTokenSafe(): Promise<string | null> {
   }
 }
 
+async function getAuthUserIdSafe(): Promise<string | null> {
+  try {
+    const { createClient } = await import('@supabase/supabase-js')
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    )
+
+    const { data } = await supabase.auth.getUser()
+    return data?.user?.id || null
+  } catch {
+    return null
+  }
+}
+
 // ─────────────────────────────────────────────
 // NETWORK LAYER
 // ─────────────────────────────────────────────
@@ -198,11 +214,27 @@ export async function logSymptom(
     Math.max(0, Math.min(10, Number(v)))
   )
 
+  const userId = await getAuthUserIdSafe()
+
   return runAction('log', {
+    ...(userId ? { user_id: userId } : {}),
     feature_vector: safeVector,
     notes: safeString(notes, 300),
     emoji: safeString(emoji, 10),
   })
+}
+
+// ─────────────────────────────────────────────
+// ACTION: STATS
+// ─────────────────────────────────────────────
+export async function getUserStats() {
+  const userId = await getAuthUserIdSafe()
+
+  const data = await runAction('stats', {
+    ...(userId ? { user_id: userId } : {}),
+  })
+
+  return data.stats
 }
 
 // ─────────────────────────────────────────────
@@ -217,7 +249,12 @@ export async function runMLPipeline(
     throw new MLClientError('Invalid symptoms')
   }
 
-  const data = await runAction('predict', { symptoms: clean })
+  const userId = await getAuthUserIdSafe()
+
+  const data = await runAction('predict', {
+    ...(userId ? { user_id: userId } : {}),
+    symptoms: clean,
+  })
 
   // SAFE PARSING (never crash UI)
   const pred = safeObject<MLPrediction>(data.prediction)
@@ -249,7 +286,10 @@ export async function submitFeedback(
     throw new MLClientError('Missing prediction_id')
   }
 
+  const userId = await getAuthUserIdSafe()
+
   return runAction('feedback', {
+    ...(userId ? { user_id: userId } : {}),
     prediction_id: predictionId,
     predicted: clamp(predicted),
     actual: clamp(actual),

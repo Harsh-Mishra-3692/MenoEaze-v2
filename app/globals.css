@@ -17,21 +17,21 @@ html {
 }
 
 .blob1 {
-  background: radial-gradient(circle, #a855f7, #ec4899);
+  background: radial-gradient(circle, #2dd4bf, #0d9488); /* Teal */
   top: -200px;
   left: -200px;
   animation: float1 22s infinite ease-in-out alternate;
 }
 
 .blob2 {
-  background: radial-gradient(circle, #ec4899, #f43f5e);
+  background: radial-gradient(circle, #fb7185, #e11d48); /* Coral */
   bottom: -200px;
   right: -200px;
   animation: float2 28s infinite ease-in-out alternate;
 }
 
 .blob3 {
-  background: radial-gradient(circle, #f472b6, #a855f7);
+  background: radial-gradient(circle, #94a3b8, #475569); /* Slate */
   top: 40%;
   left: 40%;
   animation: float3 30s infinite ease-in-out alternate;
