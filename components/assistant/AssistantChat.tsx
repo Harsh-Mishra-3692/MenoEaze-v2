@@ -13,6 +13,7 @@ interface Message {
     content: string
     timestamp: Date
     citations?: Citation[]
+    degradedReasons?: string[]
 }
 
 
@@ -86,14 +87,20 @@ export default function AssistantChat({ userId, userEmail }: Props) {
             }
 
             try {
-                // Mock delay
-                await new Promise(res => setTimeout(res, 1000));
+                const res = await fetch('/api/assistant', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ userId, message: messageText })
+                })
+
+                const data = await res.json()
 
                 const assistantMessage: Message = {
                     role: "assistant",
-                    content: "Chat intelligence is disabled. Please run a structured analysis via the dashboard.",
+                    content: data.reply || "I'm sorry, I couldn't process that right now.",
                     timestamp: new Date(),
-                    citations: []
+                    citations: Array.isArray(data.citations) ? data.citations : [],
+                    degradedReasons: Array.isArray(data.degradedReasons) ? data.degradedReasons : undefined
                 }
 
                 setMessages(prev => [...prev, assistantMessage])
@@ -335,6 +342,15 @@ function MessageBubble({ message }: { message: Message }) {
                                         <CitationCard key={i} citation={c} />
                                     ))}
                                 </div>
+                            </div>
+                        )}
+
+                        {/* Feature 7: Degraded Mode Transparency */}
+                        {message.degradedReasons && message.degradedReasons.length > 0 && (
+                            <div className="pt-2 mt-2 border-t border-yellow-500/20">
+                                <p className="text-[11px] text-yellow-400/80">
+                                    ⚡ Some subsystems operated in fallback mode: {message.degradedReasons.join(', ')}
+                                </p>
                             </div>
                         )}
                     </div>

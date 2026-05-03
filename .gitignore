@@ -35,6 +35,8 @@ ml_engine/venv/
 .env.*
 .env.local
 ml_engine/.env
+.env
+.env.local
 
 # Allow only templates
 !.env.example

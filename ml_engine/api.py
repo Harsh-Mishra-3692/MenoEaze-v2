@@ -1,14 +1,15 @@
-# api.py — FINAL ELITE v2 (FULL PRODUCTION ORCHESTRATOR)
+# api.py — ELITE v4 (ZERO-TRUST | HARDENED | PRODUCTION SAFE)
 
 import time
 import asyncio
 import uuid
 import hashlib
-from typing import List, Optional
+from typing import Dict, Any, Literal, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, validator, Field
+from pydantic import BaseModel, validator
+from jose import jwt, JWTError
 
 from ml_engine.pipeline import full_pipeline
 from ml_engine.db_client import (
@@ -16,9 +17,7 @@ from ml_engine.db_client import (
     fetch_recent_logs,
     insert_prediction,
     insert_feedback,
-    fetch_prediction_history,
-    fetch_feedback_history,
-    insert_guardrail_log
+    insert_guardrail_log,
 )
 from ml_engine.memory import add_prediction_context, get_full_history
 from ml_engine.trust_filter import compute_trust_single
@@ -26,17 +25,22 @@ from ml_engine.logger import get_logger, set_request_id
 from ml_engine.personalization_trainer import update_personalization_from_feedback
 from ml_engine.build_features import build_features
 
-logger = get_logger("menoeaze.api")
+import os
 
-SEQ_LEN = 5
-FEATURES = 11
-PIPELINE_TIMEOUT = 6.0
-DB_TIMEOUT = 2.0
-MAX_QUERY_LEN = 500
-MIN_USER_ID_LEN = 10
+logger = get_logger("menoeaze.api")
 
 app = FastAPI(title="MenoEaze API")
 
+# ─────────────────────────────────────────────
+# CONFIG
+# ─────────────────────────────────────────────
+SEQ_LEN = 5
+FEATURES = 11
+PIPELINE_TIMEOUT = 6.0
+MAX_QUERY_LEN = 500
+MIN_LOGS_REQUIRED = 5
+
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 # ─────────────────────────────────────────────
 # MIDDLEWARE
@@ -47,9 +51,14 @@ async def add_request_context(request: Request, call_next):
     set_request_id(req_id)
 
     start = time.time()
-    response = await call_next(request)
-    latency = round((time.time() - start) * 1000, 2)
 
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception("[MIDDLEWARE][CRASH]")
+        raise
+
+    latency = round((time.time() - start) * 1000, 2)
     response.headers["X-Request-ID"] = req_id
 
     logger.info(f"{request.method} {request.url.path} | {latency}ms | {req_id}")
@@ -58,230 +67,277 @@ async def add_request_context(request: Request, call_next):
 
 
 # ─────────────────────────────────────────────
-# SCHEMAS
+# AUTH (ZERO TRUST)
 # ─────────────────────────────────────────────
-class LogSymptomRequest(BaseModel):
-    user_id: str
-    feature_vector: List[float]
-    notes: Optional[str] = ""
-    emoji: Optional[str] = ""
+def extract_user_id(request: Request) -> str:
+    try:
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            raise HTTPException(401, "Missing token")
 
-    @validator("feature_vector")
-    def validate_vector(cls, v):
-        if len(v) != FEATURES:
-            raise ValueError("feature_vector must be length 11")
-        if any([not np.isfinite(x) for x in v]):
-            raise ValueError("Invalid numeric values")
-        return [float(max(-5, min(10, x))) for x in v]
+        token = auth_header.replace("Bearer ", "")
+        decoded = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
+
+        user_id = decoded.get("sub")
+        if not user_id:
+            raise HTTPException(401, "Invalid token")
+
+        return user_id
+
+    except JWTError:
+        raise HTTPException(401, "Invalid or expired token")
 
 
-class PredictRequest(BaseModel):
-    user_id: str
-    symptoms: str
+# ─────────────────────────────────────────────
+# REQUEST SCHEMA
+# ─────────────────────────────────────────────
+class RunRequest(BaseModel):
+    action: Literal["log", "predict", "feedback"]
+    payload: Dict[str, Any]
 
-    @validator("user_id")
-    def validate_user(cls, v):
-        if not v or len(v) < MIN_USER_ID_LEN:
-            raise ValueError("Invalid user_id")
+    @validator("payload")
+    def validate_payload(cls, v):
+        if not isinstance(v, dict):
+            raise ValueError("Invalid payload")
         return v
-
-    @validator("symptoms")
-    def validate_symptoms(cls, v):
-        v = v.strip()
-        if not v or len(v) < 3:
-            raise ValueError("Invalid symptoms text")
-        return v[:MAX_QUERY_LEN]
-
-
-class FeedbackRequest(BaseModel):
-    user_id: str
-    prediction_id: str
-    predicted: float
-    actual: float
-    rating: int
 
 
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
-def _sanitize_text(text: str, max_len=300):
+def _sanitize_text(text: Any, max_len=300) -> str:
     try:
         return str(text).strip()[:max_len]
     except:
         return ""
 
 
-def build_sequence(logs):
+def _clamp(x):
+    try:
+        return float(max(0.0, min(1.0, float(x))))
+    except:
+        return 0.5
+
+
+def _build_sequence(logs):
     if not logs:
         return None
-    seq = [
-        l.get("feature_vector")
-        for l in logs
-        if isinstance(l.get("feature_vector"), list)
-        and len(l.get("feature_vector")) == FEATURES
-    ]
-    if len(seq) < 3:
+
+    valid = []
+    for l in logs:
+        fv = l.get("feature_vector")
+        if isinstance(fv, list) and len(fv) == FEATURES:
+            valid.append(fv)
+
+    if len(valid) < MIN_LOGS_REQUIRED:
         return None
-    return np.array(seq[-SEQ_LEN:], dtype=np.float32)
+
+    return np.array(valid[-SEQ_LEN:], dtype=np.float32)
 
 
-def safe_prediction(pred: dict):
-    try:
-        return (
-            max(0.0, min(1.0, float(pred.get("severity", 0.5)))),
-            max(0.0, min(1.0, float(pred.get("confidence", 0.5))))
-        )
-    except:
-        return 0.5, 0.5
+def _safe_background(task, *args):
+    async def wrapper():
+        try:
+            await asyncio.to_thread(task, *args)
+        except Exception:
+            logger.exception("[BACKGROUND TASK FAILED]")
+
+    asyncio.create_task(wrapper())
 
 
-def _idempotency_key(user_id, query):
-    return hashlib.md5(f"{user_id}:{query}".encode()).hexdigest()
-
-
-# ─────────────────────────────────────────────
-# LOG SYMPTOM
-# ─────────────────────────────────────────────
-@app.post("/log-symptom")
-async def log_symptom(data: LogSymptomRequest):
-
-    ok = insert_symptom_log(
-        user_id=data.user_id,
-        feature_vector=data.feature_vector,
-        raw_text=_sanitize_text(data.notes),
-        emoji=_sanitize_text(data.emoji, 10)
-    )
-
-    if not ok:
-        raise HTTPException(503, "Failed to store symptom log in database")
-
-    asyncio.create_task(asyncio.to_thread(build_features))
-
-    return {"status": "logged"}
+def _idempotency_key(user_id, action, payload):
+    raw = f"{user_id}:{action}:{str(payload)[:200]}"
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 # ─────────────────────────────────────────────
-# RUN PIPELINE
+# MAIN ENDPOINT
 # ─────────────────────────────────────────────
-@app.post("/predict")
-async def run_predict(data: PredictRequest):
+@app.post("/run")
+async def run(req: RunRequest, request: Request):
 
     start = time.time()
-    request_key = _idempotency_key(data.user_id, data.symptoms)
+    user_id = extract_user_id(request)
+    req_key = _idempotency_key(user_id, req.action, req.payload)
 
     try:
-        logs = fetch_recent_logs(data.user_id)
-        if logs is None:
-            raise Exception("DB Fetch Failed")
-    except Exception as e:
-        logger.error(f"[API] DB Error on fetch_recent_logs: {e}")
-        raise HTTPException(503, "Database unavailable")
+        # ─────────────────────────────
+        # LOG
+        # ─────────────────────────────
+        if req.action == "log":
 
-    seq = build_sequence(logs)
+            fv = req.payload.get("feature_vector")
 
-    try:
-        user_history = await asyncio.to_thread(get_full_history, data.user_id)
-    except Exception:
-        user_history = []
+            if not isinstance(fv, list) or len(fv) != FEATURES:
+                raise HTTPException(400, "Invalid feature_vector")
 
-    # ───────── EXACTLY ONE PIPELINE EXECUTION
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                full_pipeline,
-                user_id=data.user_id,
-                query=data.symptoms,
-                sequence=seq,
-                user_history=user_history
-            ),
-            timeout=PIPELINE_TIMEOUT
-        )
-    except Exception as e:
-        logger.error(f"[API] pipeline failed: {e}")
-        result = {
-            "prediction": {"severity": 0.5, "confidence": 0.3},
-            "rag": {"answer": "System is currently degraded. Please consult a healthcare professional.", "sources": []}
-        }
+            try:
+                fv = [float(max(0, min(10, x))) for x in fv]
+            except:
+                raise HTTPException(400, "Invalid feature values")
 
-    sev, conf = safe_prediction(result.get("prediction", {}))
-    rag = result.get("rag", {})
-
-    override = result.get("reasoning", {}).get("override", False)
-
-    if override:
-        insert_guardrail_log(user_id=data.user_id, query=data.symptoms, severity=sev, message=rag.get("answer"))
-        prediction_id = None
-    else:
-        try:
-            prediction_id = insert_prediction(
-                user_id=data.user_id,
-                severity=sev,
-                confidence=conf,
-                reasoning=rag.get("answer", "")
+            ok = insert_symptom_log(
+                user_id=user_id,
+                feature_vector=fv,
+                raw_text=_sanitize_text(req.payload.get("notes")),
+                emoji=_sanitize_text(req.payload.get("emoji"), 10)
             )
+
+            if not ok:
+                raise HTTPException(503, "DB write failed")
+
+            _safe_background(build_features)
+
+            return {
+                "status": "ok",
+                "action": "log",
+                "request_id": req_key
+            }
+
+        # ─────────────────────────────
+        # PREDICT
+        # ─────────────────────────────
+        elif req.action == "predict":
+
+            query = _sanitize_text(req.payload.get("symptoms"), MAX_QUERY_LEN)
+
+            if not query or len(query) < 3:
+                raise HTTPException(400, "Invalid symptoms")
+
+            logs = fetch_recent_logs(user_id)
+
+            if logs is None:
+                raise HTTPException(503, "DB unavailable")
+
+            if len(logs) < MIN_LOGS_REQUIRED:
+                raise HTTPException(
+                    400,
+                    f"Insufficient data: need at least {MIN_LOGS_REQUIRED} logs"
+                )
+
+            seq = _build_sequence(logs)
+
+            try:
+                user_history = await asyncio.to_thread(get_full_history, user_id)
+            except:
+                user_history = []
+
+            # 🔥 HARDENED PIPELINE CALL
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        full_pipeline,
+                        user_id=user_id,
+                        query=query,
+                        sequence=seq,
+                        user_history=user_history
+                    ),
+                    timeout=PIPELINE_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(503, "Pipeline timeout")
+
+            # SAFE EXTRACTION
+            pred = result.get("prediction", {}) or {}
+            rag = result.get("rag", {}) or {}
+            reasoning = result.get("reasoning", {}) or {}
+
+            sev = _clamp(pred.get("severity"))
+            conf = _clamp(pred.get("confidence"))
+
+            override = reasoning.get("override", False)
+
+            prediction_id = None
+
+            if override:
+                insert_guardrail_log(
+                    user_id=user_id,
+                    query=query,
+                    severity=sev,
+                    message=rag.get("answer", "")
+                )
+            else:
+                prediction_id = insert_prediction(
+                    user_id=user_id,
+                    severity=sev,
+                    confidence=conf,
+                    reasoning=rag.get("answer", "")
+                )
+
+                if not prediction_id:
+                    raise HTTPException(503, "Prediction store failed")
+
+                _safe_background(
+                    add_prediction_context,
+                    user_id,
+                    query,
+                    sev,
+                    conf
+                )
+
+            return {
+                "status": result.get("status", "ok"),
+                "action": "predict",
+                "prediction": {
+                    "severity": round(sev, 4),
+                    "confidence": round(conf, 4),
+                    "prediction_id": prediction_id
+                },
+                "rag": rag,
+                "meta": result.get("meta", {}),
+                "reasoning": reasoning,
+                "doctor": result.get("doctor", {}),
+                "latency_ms": int((time.time() - start) * 1000),
+                "request_id": req_key
+            }
+
+        # ─────────────────────────────
+        # FEEDBACK
+        # ─────────────────────────────
+        elif req.action == "feedback":
+
+            predicted = _clamp(req.payload.get("predicted"))
+            actual = _clamp(req.payload.get("actual"))
+            rating = int(max(1, min(10, req.payload.get("rating", 5))))
+
+            prediction_id = _sanitize_text(req.payload.get("prediction_id"), 50)
+
             if not prediction_id:
-                raise Exception("Insert returned None")
-        except Exception as e:
-            logger.error(f"[API] prediction store failed: {e}")
-            raise HTTPException(503, "Database unavailable")
+                raise HTTPException(400, "Missing prediction_id")
 
-        try:
-            add_prediction_context(
-                user_id=data.user_id,
-                query=data.symptoms,
-                severity=sev,
-                confidence=conf
+            trust = compute_trust_single({
+                "predicted": predicted,
+                "actual": actual,
+                "rating": rating
+            })
+
+            ok = insert_feedback(
+                user_id=user_id,
+                prediction_id=prediction_id,
+                predicted=predicted,
+                actual=actual,
+                rating=rating,
+                trust_score=trust
             )
-        except Exception:
-            pass
 
-    latency = round((time.time() - start) * 1000, 2)
+            if not ok:
+                raise HTTPException(503, "Feedback write failed")
 
-    return {
-        "prediction": {
-            "severity": round(sev, 4),
-            "confidence": round(conf, 4),
-            "prediction_id": prediction_id
-        },
-        "rag": rag,
-        "request_id": request_key,
-        "latency_ms": latency
-    }
+            _safe_background(update_personalization_from_feedback, user_id)
 
+            return {
+                "status": "ok",
+                "action": "feedback",
+                "trust_score": round(trust, 4),
+                "request_id": req_key
+            }
 
-# ─────────────────────────────────────────────
-# FEEDBACK
-# ─────────────────────────────────────────────
-@app.post("/feedback")
-async def feedback(data: FeedbackRequest):
+        else:
+            raise HTTPException(400, "Invalid action")
 
-    predicted = max(0.0, min(1.0, data.predicted))
-    actual = max(0.0, min(1.0, data.actual))
-    rating = max(1, min(10, data.rating))
+    except HTTPException:
+        raise
 
-    trust_score = compute_trust_single({
-        "predicted": predicted,
-        "actual": actual,
-        "rating": rating
-    })
-
-    try:
-        ok = insert_feedback(
-            user_id=data.user_id,
-            prediction_id=data.prediction_id,
-            predicted=predicted,
-            actual=actual,
-            rating=rating,
-            trust_score=trust_score
-        )
-        if not ok: 
-            raise Exception("Insert failed")
-    except Exception as e:
-        logger.error(f"[API] feedback insert failed: {e}")
-        raise HTTPException(503, "Database unavailable")
-
-    asyncio.create_task(
-        asyncio.to_thread(update_personalization_from_feedback, data.user_id)
-    )
-
-    return {"status": "ok", "trust_score": round(trust_score, 4)}
+    except Exception:
+        logger.exception("[API][CRITICAL]")
+        raise HTTPException(500, "Internal server error")

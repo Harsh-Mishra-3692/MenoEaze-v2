@@ -55,12 +55,9 @@ export default function AuthPage() {
 
         if (error) throw error
 
-        // Create profile with username
+        // Save username to localStorage (Frontend MUST NOT write to Supabase directly)
         if (data.user) {
-          await supabase.from('profiles').upsert({
-            id: data.user.id,
-            username: username.trim()
-          })
+          localStorage.setItem('menoeaze_username', username.trim())
         }
 
         if (data.user && !data.session) {

@@ -38,19 +38,14 @@ export default function DashboardPage() {
     })
 
     useEffect(() => {
-        supabase.auth.getUser().then(async ({ data }) => {
+        supabase.auth.getUser().then(({ data }) => {
             if (data.user) {
                 setUserId(data.user.id)
 
-                // Fetch username from profiles
-                const { data: profile } = await supabase
-                    .from('profiles')
-                    .select('username')
-                    .eq('id', data.user.id)
-                    .single()
-
-                if (profile && profile.username && profile.username.trim() !== '') {
-                    setUserName(profile.username)
+                // Fetch username from local storage (NO DB LEAKS ALLOWED)
+                const storedName = localStorage.getItem('menoeaze_username')
+                if (storedName && storedName.trim() !== '') {
+                    setUserName(storedName)
                 } else {
                     // No username set — show prompt
                     setShowUsernameModal(true)
@@ -64,10 +59,8 @@ export default function DashboardPage() {
         if (!usernameInput.trim() || !userId) return
         setSavingUsername(true)
 
-        await supabase.from('profiles').upsert({
-            id: userId,
-            username: usernameInput.trim()
-        })
+        // Save strictly to local storage (Frontend MUST NOT write to Supabase directly)
+        localStorage.setItem('menoeaze_username', usernameInput.trim())
 
         setUserName(usernameInput.trim())
         setShowUsernameModal(false)
@@ -75,37 +68,9 @@ export default function DashboardPage() {
     }
 
     async function fetchStats() {
-        const { data } = await supabase
-            .from('symptom_logs')
-            .select('severity, created_at')
-            .eq('is_deleted', false)
-
-        if (!data) return
-
-        const total = data.length
-        const avgSeverity =
-            total > 0
-                ? parseFloat(
-                    (data.reduce((a, b) => a + b.severity, 0) / total).toFixed(1)
-                )
-                : 0
-
-        const lastLogged =
-            total > 0
-                ? new Date(
-                    Math.max(...data.map(d => new Date(d.created_at).getTime()))
-                ).toLocaleDateString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    year: 'numeric'
-                })
-                : '—'
-
-        const weekAgo = new Date()
-        weekAgo.setDate(weekAgo.getDate() - 7)
-        const weekly = data.filter(d => new Date(d.created_at) > weekAgo).length
-
-        setStats({ total, avgSeverity, lastLogged, weekly })
+        // DISABLED: Architectural constraint - Frontend MUST NOT query Supabase directly
+        // Future: Backend /run endpoint will return stats natively.
+        setStats({ total: 0, avgSeverity: 0, lastLogged: '—', weekly: 0 })
     }
 
     const greeting = () => {
