@@ -86,23 +86,14 @@ export default function AssistantChat({ userId, userEmail }: Props) {
             }
 
             try {
-                const res = await fetch("/api/assistant", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ userId, message: messageText })
-                })
-
-                if (!res.ok) throw new Error("Failed to get response")
-
-                const data = await res.json()
-
-                if (data.error) throw new Error(data.error)
+                // Mock delay
+                await new Promise(res => setTimeout(res, 1000));
 
                 const assistantMessage: Message = {
                     role: "assistant",
-                    content: data.reply,
+                    content: "Chat intelligence is disabled. Please run a structured analysis via the dashboard.",
                     timestamp: new Date(),
-                    citations: data.citations || []
+                    citations: []
                 }
 
                 setMessages(prev => [...prev, assistantMessage])

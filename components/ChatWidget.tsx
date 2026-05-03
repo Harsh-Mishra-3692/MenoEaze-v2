@@ -102,31 +102,12 @@ export default function ChatWidget({ userId }: Props) {
         )
       )
 
-      const response = await fetch('/api/assistant', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`
-        },
-        body: JSON.stringify({
-          userId,
-          message: optimisticMessage.content
-        }),
-        signal: abortRef.current.signal
-      })
-
-      if (!response.ok) {
-        throw new Error('AI response failed')
-      }
-
-      const data = await response.json()
-
       const assistantId = crypto.randomUUID()
 
       const assistantMessage: ChatMessage = {
         id: assistantId,
         role: 'assistant',
-        content: data.reply,
+        content: "Chat intelligence is disabled to enforce structured analysis. Please run an analysis directly from the dashboard.",
         status: 'sent',
         created_at: new Date().toISOString()
       }

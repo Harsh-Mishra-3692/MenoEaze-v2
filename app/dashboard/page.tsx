@@ -261,7 +261,7 @@ export default function DashboardPage() {
                                 </h2>
                             </div>
                             {userId ? (
-                                <AnalysisCard userId={userId} />
+                                <AnalysisCard userId={userId} key={stats.lastLogged || Date.now()} />
                             ) : (
                                 <div className="text-gray-400 text-sm py-12 text-center">
                                     Loading your analytics…

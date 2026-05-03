@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { logSymptom } from '../lib/mlClient'
 
 interface Props {
   onSuccess?: () => void
@@ -125,23 +126,24 @@ export default function SymptomForm({ onSuccess }: Props) {
         bmi: features.bmi
       }))
 
-      const mlApiUrl = process.env.NEXT_PUBLIC_ML_API_URL || 'http://localhost:8000'
-
-      const res = await fetch(`${mlApiUrl}/log-symptom`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: userId,
-          features,
-          notes,
-          timestamp: Date.now()
-        }),
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err?.detail || 'Failed to log symptoms')
-      }
+      await logSymptom(
+        userId,
+        [
+          features.hot_flash_score,
+          features.night_sweats_score,
+          features.sleep_quality,
+          features.mood_score,
+          features.fatigue_score,
+          features.anxiety_score,
+          features.physical_activity,
+          features.stress_level,
+          features.caffeine_intake,
+          features.age,
+          features.bmi
+        ],
+        notes,
+        ''
+      )
 
       setSuccess(true)
       setStep(0)
