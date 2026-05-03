@@ -1,4 +1,4 @@
-# rag_evaluator.py — FINAL ELITE (CLINICAL + RUNTIME SAFE)
+# rag_evaluator.py — FINAL ELITE v3 (ROBUST + CALIBRATED + AUDITABLE)
 
 import logging
 import numpy as np
@@ -15,22 +15,28 @@ MIN_GROUNDEDNESS = 0.2
 MAX_HALLUCINATION = 0.6
 MIN_RELEVANCE = 0.15
 
+EPS = 1e-9
+
 STOPWORDS = {
     "the","is","and","of","to","a","in","that","it","on","for"
 }
 
+MAX_TOKENS = 500
+
 
 # ─────────────────────────────────────────────
-# TEXT UTILITIES (ROBUST)
+# TOKENIZATION (SAFE + BOUNDED)
 # ─────────────────────────────────────────────
 def _tokenize(text: str) -> List[str]:
-    if not text:
+    if not isinstance(text, str) or not text:
         return []
 
     text = re.sub(r"[^\w\s]", " ", text.lower())
     tokens = text.split()
 
-    return [t for t in tokens if t not in STOPWORDS and len(t) > 2]
+    tokens = [t for t in tokens if t not in STOPWORDS and len(t) > 2]
+
+    return tokens[:MAX_TOKENS]
 
 
 def _safe_div(a, b):
@@ -38,51 +44,68 @@ def _safe_div(a, b):
 
 
 # ─────────────────────────────────────────────
-# SEMANTIC SIMILARITY (IMPROVED)
+# TF COSINE (IMPROVED SEMANTICS)
 # ─────────────────────────────────────────────
-def _cosine(a, b):
-    if not a or not b:
+def _tf_vector(tokens: List[str]) -> Dict[str, float]:
+    if not tokens:
+        return {}
+
+    counts = Counter(tokens)
+    total = sum(counts.values()) + EPS
+
+    return {k: v / total for k, v in counts.items()}
+
+
+def _cosine_tf(a_tokens, b_tokens):
+    if not a_tokens or not b_tokens:
         return 0.0
 
-    vocab = list(set(a + b))
-    vec_a = np.array([a.count(t) for t in vocab])
-    vec_b = np.array([b.count(t) for t in vocab])
+    vec_a = _tf_vector(a_tokens)
+    vec_b = _tf_vector(b_tokens)
 
-    denom = np.linalg.norm(vec_a) * np.linalg.norm(vec_b)
-    return float(np.dot(vec_a, vec_b) / denom) if denom else 0.0
+    common = set(vec_a) & set(vec_b)
+
+    num = sum(vec_a[t] * vec_b[t] for t in common)
+    norm_a = np.sqrt(sum(v * v for v in vec_a.values()))
+    norm_b = np.sqrt(sum(v * v for v in vec_b.values()))
+
+    denom = norm_a * norm_b + EPS
+
+    return float(num / denom)
 
 
 # ─────────────────────────────────────────────
 # GROUNDING
 # ─────────────────────────────────────────────
 def compute_groundedness(answer, context_docs):
-    return _cosine(
-        _tokenize(answer),
-        _tokenize(" ".join(context_docs))
-    )
+    ctx = " ".join(context_docs or [])
+    return _cosine_tf(_tokenize(answer), _tokenize(ctx))
 
 
 # ─────────────────────────────────────────────
-# HALLUCINATION (IMPROVED)
+# HALLUCINATION (SOFT + LENGTH NORMALIZED)
 # ─────────────────────────────────────────────
 def hallucination_score(answer, context_docs):
 
     answer_tokens = _tokenize(answer)
-    context_tokens = set(_tokenize(" ".join(context_docs)))
+    context_tokens = set(_tokenize(" ".join(context_docs or [])))
 
     if not answer_tokens:
         return 1.0
 
     unsupported = sum(1 for t in answer_tokens if t not in context_tokens)
 
-    return unsupported / len(answer_tokens)
+    raw = unsupported / (len(answer_tokens) + EPS)
+
+    # soften penalty (avoid punishing paraphrases too harshly)
+    return float(np.clip(raw ** 0.7, 0.0, 1.0))
 
 
 # ─────────────────────────────────────────────
 # RELEVANCE
 # ─────────────────────────────────────────────
 def answer_relevance(query, answer):
-    return _cosine(_tokenize(query), _tokenize(answer))
+    return _cosine_tf(_tokenize(query), _tokenize(answer))
 
 
 # ─────────────────────────────────────────────
@@ -90,31 +113,37 @@ def answer_relevance(query, answer):
 # ─────────────────────────────────────────────
 def context_coverage(answer, context_docs):
 
+    if not context_docs:
+        return 0.0
+
     scores = [
-        _cosine(_tokenize(answer), _tokenize(doc))
-        for doc in context_docs
+        _cosine_tf(_tokenize(answer), _tokenize(doc))
+        for doc in context_docs if doc
     ]
 
     return float(np.mean(scores)) if scores else 0.0
 
 
 # ─────────────────────────────────────────────
-# CONSISTENCY
+# CONSISTENCY (REPETITION CONTROL)
 # ─────────────────────────────────────────────
 def consistency_score(answer):
 
     tokens = _tokenize(answer)
+
     if not tokens:
         return 0.0
 
     counts = Counter(tokens)
-    repetition = sum(v for v in counts.values() if v > 1)
+    repetition = sum(v - 1 for v in counts.values() if v > 1)
 
-    return float(np.clip(1 - repetition / len(tokens), 0.0, 1.0))
+    penalty = repetition / (len(tokens) + EPS)
+
+    return float(np.clip(1 - penalty, 0.0, 1.0))
 
 
 # ─────────────────────────────────────────────
-# DECISION LAYER (NEW)
+# DECISION
 # ─────────────────────────────────────────────
 def _safety_decision(metrics):
 
@@ -135,21 +164,26 @@ def _safety_decision(metrics):
 
 
 # ─────────────────────────────────────────────
-# CONFIDENCE CALIBRATION (NEW)
+# CONFIDENCE CALIBRATION (STABLE)
 # ─────────────────────────────────────────────
 def _calibrate_confidence(base_conf, metrics):
 
+    base_conf = float(np.clip(base_conf, 0.0, 1.0))
+
     penalty = (
-        (1 - metrics["groundedness"]) * 0.4 +
-        metrics["hallucination"] * 0.4 +
-        (1 - metrics["relevance"]) * 0.2
+        (1 - metrics["groundedness"]) * 0.35 +
+        metrics["hallucination"] * 0.35 +
+        (1 - metrics["relevance"]) * 0.2 +
+        (1 - metrics["coverage"]) * 0.1
     )
 
-    return float(np.clip(base_conf * (1 - penalty), 0.0, 1.0))
+    adjusted = base_conf * (1 - penalty)
+
+    return float(np.clip(adjusted, 0.0, 1.0))
 
 
 # ─────────────────────────────────────────────
-# MAIN EVALUATOR
+# MAIN
 # ─────────────────────────────────────────────
 def evaluate_rag(
     query: str,
@@ -168,37 +202,43 @@ def evaluate_rag(
         consistency = consistency_score(answer)
 
         metrics = {
-            "groundedness": grounded,
-            "hallucination": halluc,
-            "relevance": relevance,
-            "coverage": coverage,
-            "consistency": consistency,
+            "groundedness": float(np.clip(grounded, 0.0, 1.0)),
+            "hallucination": float(np.clip(halluc, 0.0, 1.0)),
+            "relevance": float(np.clip(relevance, 0.0, 1.0)),
+            "coverage": float(np.clip(coverage, 0.0, 1.0)),
+            "consistency": float(np.clip(consistency, 0.0, 1.0)),
         }
 
-        # ── decision layer
         decision = _safety_decision(metrics)
 
-        # ── confidence recalibration
         calibrated_conf = _calibrate_confidence(base_confidence, metrics)
 
-        # ── composite score
         composite = (
-            0.3 * grounded +
-            0.2 * (1 - halluc) +
-            0.2 * relevance +
-            0.15 * coverage +
-            0.15 * consistency
+            0.3 * metrics["groundedness"] +
+            0.2 * (1 - metrics["hallucination"]) +
+            0.2 * metrics["relevance"] +
+            0.15 * metrics["coverage"] +
+            0.15 * metrics["consistency"]
         )
 
-        return {
+        result = {
             **{k: round(v, 4) for k, v in metrics.items()},
-            "composite_score": round(composite, 4),
+            "composite_score": round(float(composite), 4),
             "decision": decision,
-            "confidence_adjusted": round(calibrated_conf, 3)
+            "confidence_adjusted": round(calibrated_conf, 3),
         }
 
+        # 🔍 audit trace (critical for debugging)
+        result["_audit"] = {
+            "answer_len": len(answer or ""),
+            "num_docs": len(context_docs or []),
+            "token_count": len(_tokenize(answer))
+        }
+
+        return result
+
     except Exception as e:
-        logger.error(f"[RAG Eval] fatal: {e}")
+        logger.error(f"[RAG Eval][FAIL] {e}")
 
         return {
             "groundedness": 0.0,
@@ -208,5 +248,6 @@ def evaluate_rag(
             "consistency": 0.0,
             "composite_score": 0.0,
             "decision": "unsafe",
-            "confidence_adjusted": 0.0
+            "confidence_adjusted": 0.0,
+            "_audit": {"error": True}
         }

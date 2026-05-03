@@ -1,4 +1,4 @@
-# hybrid_retriever.py — FINAL ELITE (CLINICAL + ROBUST + PRIORITY-AWARE)
+# hybrid_retriever.py — FINAL ELITE v3 (STABLE + CORRECT + HYBRID-SAFE)
 
 import logging
 import re
@@ -8,15 +8,16 @@ from typing import List, Dict, Any, Optional
 from ml_engine.hf_embedder import HFEmbedder
 from ml_engine.db_client import call_rpc, fetch_table
 
+# ✅ correct imports (aligned with your new modules)
 try:
-    from ml_engine.research.bm25_index import BM25Index
-except:
-    BM25Index = None
+    from ml_engine.research.bm25_index import bm25_rank
+except Exception:
+    bm25_rank = None
 
 try:
-    from ml_engine.research.fusion import hybrid_fusion
-except:
-    hybrid_fusion = None
+    from ml_engine.research.fusion import fuse_results
+except Exception:
+    fuse_results = None
 
 logger = logging.getLogger("menoeaze.hybrid")
 
@@ -30,8 +31,9 @@ PERSONALIZATION_WEIGHT = 0.15
 PRIORITY_BOOST = 0.25
 MIN_SCORE = 0.05
 
+MAX_QUERY_LENGTH = 500
+
 _embedder = None
-_bm25 = None
 
 
 # ─────────────────────────────────────────────
@@ -43,62 +45,43 @@ def _get_embedder():
         try:
             _embedder = HFEmbedder()
         except Exception:
+            logger.exception("[HYBRID][EMBEDDER][FAIL]")
             _embedder = None
     return _embedder
-
-
-def _get_bm25():
-    global _bm25
-
-    if BM25Index is None:
-        return None
-
-    if _bm25:
-        return _bm25
-
-    try:
-        docs = fetch_table("medical_documents", limit=1000)
-        bm25 = BM25Index()
-        bm25.build(docs)
-        _bm25 = bm25
-    except:
-        _bm25 = None
-
-    return _bm25
 
 
 # ─────────────────────────────────────────────
 # CLEAN
 # ─────────────────────────────────────────────
-def _clean(text: str):
+def _clean(text: str) -> str:
     try:
-        return re.sub(r"\s+", " ", text.lower()).strip()[:300]
-    except:
+        return re.sub(r"\s+", " ", text.lower()).strip()[:MAX_QUERY_LENGTH]
+    except Exception:
         return ""
 
 
 # ─────────────────────────────────────────────
-# NORMALIZATION
+# VALIDATION
 # ─────────────────────────────────────────────
-def _normalize_scores(docs, key):
-    vals = [d.get(key, 0.0) for d in docs]
-    if not vals:
-        return docs
+def _validate_doc(d: Dict) -> bool:
+    if not isinstance(d, dict):
+        return False
+    if not d.get("content"):
+        return False
+    return True
 
-    mn, mx = min(vals), max(vals)
-    if mx - mn < 1e-6:
-        return docs
 
-    for d in docs:
-        d[key] = (d.get(key, 0.0) - mn) / (mx - mn)
-
-    return docs
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
 
 
 # ─────────────────────────────────────────────
 # VECTOR SEARCH
 # ─────────────────────────────────────────────
-def _vector_search(query, k):
+def _vector_search(query: str, k: int) -> List[Dict]:
     embedder = _get_embedder()
     if embedder is None:
         return []
@@ -106,71 +89,85 @@ def _vector_search(query, k):
     try:
         vec = embedder.embed([query])[0]
 
-        if not vec.any():
+        if vec is None or not hasattr(vec, "any") or not vec.any():
             return []
 
-        return call_rpc(
+        res = call_rpc(
             "match_medical_documents",
             {
                 "query_embedding": vec.tolist(),
                 "match_count": k,
             }
-        ) or []
+        )
+
+        if not isinstance(res, list):
+            return []
+
+        # normalize schema
+        docs = []
+        for r in res:
+            if not _validate_doc(r):
+                continue
+
+            docs.append({
+                "content": r.get("content"),
+                "source": r.get("document_name"),
+                "score": _safe_float(r.get("similarity", 0.0)),
+                "priority": _safe_float(r.get("priority", 0.0)),
+            })
+
+        return docs
 
     except Exception as e:
-        logger.error(f"[Hybrid] vector failed: {e}")
+        logger.error(f"[HYBRID][VECTOR][FAIL] {e}")
         return []
 
 
 # ─────────────────────────────────────────────
 # BM25 SEARCH
 # ─────────────────────────────────────────────
-def _bm25_search(query, k):
-    bm25 = _get_bm25()
-    if not bm25:
+def _bm25_search(query: str, base_docs: List[Dict], k: int) -> List[Dict]:
+
+    if not bm25_rank or not base_docs:
         return []
 
     try:
-        return bm25.search(query, top_k=k) or []
-    except:
+        ranked = bm25_rank(query, base_docs, top_k=k)
+
+        docs = []
+        for d in ranked:
+            if not _validate_doc(d):
+                continue
+
+            docs.append({
+                "content": d.get("content"),
+                "source": d.get("source") or d.get("document_name"),
+                "bm25_score": _safe_float(d.get("bm25_score", 0.0)),
+                "priority": _safe_float(d.get("priority", 0.0)),
+            })
+
+        return docs
+
+    except Exception as e:
+        logger.error(f"[HYBRID][BM25][FAIL] {e}")
         return []
 
 
 # ─────────────────────────────────────────────
-# SAFE FUSION
+# PRIORITY BOOST
 # ─────────────────────────────────────────────
-def _fuse(vector_docs, keyword_docs, k):
-
-    if hybrid_fusion:
-        try:
-            return hybrid_fusion(vector_docs, keyword_docs, top_k=k)
-        except:
-            pass
-
-    # fallback: simple merge
-    combined = {d["id"]: d for d in vector_docs}
-    for d in keyword_docs:
-        if d["id"] not in combined:
-            combined[d["id"]] = d
-
-    return list(combined.values())[:k]
-
-
-# ─────────────────────────────────────────────
-# PRIORITY BOOST (CLINICAL BOOKS)
-# ─────────────────────────────────────────────
-def _apply_priority(docs):
+def _apply_priority(docs: List[Dict]) -> List[Dict]:
     for d in docs:
-        base = d.get("similarity", 0.0)
-        priority = d.get("priority", 0.0)
-        d["score"] = base + (priority * PRIORITY_BOOST)
+        base = _safe_float(d.get("fusion_score", d.get("score", 0.0)))
+        priority = _safe_float(d.get("priority", 0.0))
+        d["final_score"] = base + (priority * PRIORITY_BOOST)
     return docs
 
 
 # ─────────────────────────────────────────────
 # PERSONALIZATION
 # ─────────────────────────────────────────────
-def _apply_personalization(docs, context):
+def _apply_personalization(docs: List[Dict], context: str) -> List[Dict]:
 
     if not context:
         return docs
@@ -181,22 +178,25 @@ def _apply_personalization(docs, context):
         text = d.get("content", "")
         tokens = set(text.split())
 
+        if not tokens:
+            continue
+
         overlap = len(tokens & ctx_tokens) / max(len(ctx_tokens), 1)
 
-        d["score"] += overlap * PERSONALIZATION_WEIGHT
+        d["final_score"] += overlap * PERSONALIZATION_WEIGHT
 
     return docs
 
 
 # ─────────────────────────────────────────────
-# DIVERSITY FILTER
+# DEDUPLICATION
 # ─────────────────────────────────────────────
-def _deduplicate(docs):
+def _deduplicate(docs: List[Dict]) -> List[Dict]:
     seen = set()
     unique = []
 
     for d in docs:
-        key = (d.get("document_name"), d.get("content")[:100])
+        key = (d.get("source"), d.get("content", "")[:120])
 
         if key in seen:
             continue
@@ -214,7 +214,7 @@ def hybrid_retrieve(
     query: str,
     user_id: Optional[str] = None,
     final_k: int = DEFAULT_K
-):
+) -> List[Dict]:
 
     if not query:
         return []
@@ -224,48 +224,59 @@ def hybrid_retrieve(
     try:
         query = _clean(query)
 
+        # ───────── CONTEXT
         context = ""
         if user_id:
             rows = fetch_table("user_memory", filters={"user_id": user_id}, limit=10)
-            context = " ".join(r.get("content", "") for r in rows)
+            context = " ".join(r.get("content", "") for r in rows if r.get("content"))
 
-        expanded = f"{query} {context}"[:500]
+        expanded = f"{query} {context}".strip()[:MAX_QUERY_LENGTH]
 
+        # ───────── VECTOR
         vector_docs = _vector_search(expanded, final_k)
-        keyword_docs = _bm25_search(expanded, final_k)
 
-        docs = _fuse(vector_docs, keyword_docs, final_k)
+        # ───────── BM25 (on same docs for stability)
+        bm25_docs = _bm25_search(expanded, vector_docs, final_k)
 
-        docs = _normalize_scores(docs, "similarity")
-        docs = _apply_priority(docs)
-        docs = _apply_personalization(docs, context)
+        # ───────── FUSION
+        if fuse_results:
+            fused = fuse_results(vector_docs, bm25_docs, top_k=final_k)
+        else:
+            fused = vector_docs  # safe fallback
 
-        docs.sort(key=lambda x: x.get("score", 0), reverse=True)
+        # ───────── PRIORITY + PERSONALIZATION
+        fused = _apply_priority(fused)
+        fused = _apply_personalization(fused, context)
 
-        docs = _deduplicate(docs)
+        # ───────── SORT
+        fused.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
 
+        # ───────── DEDUP
+        fused = _deduplicate(fused)
+
+        # ───────── FINAL FILTER
         results = []
-        for d in docs[:final_k]:
+        for d in fused[:final_k]:
 
-            content = d.get("content", "")
-            if not content:
+            score = _safe_float(d.get("final_score", 0.0))
+
+            if score < MIN_SCORE:
                 continue
 
             results.append({
-                "content": content[:MAX_DOC_LENGTH],
-                "source": d.get("document_name"),
-                "score": round(d.get("score", 0), 4),
+                "content": d.get("content")[:MAX_DOC_LENGTH],
+                "source": d.get("source"),
+                "score": round(score, 4),
                 "priority": d.get("priority", 0),
             })
 
         latency = (time.time() - start) * 1000
-
-        logger.info(f"[Hybrid] {len(results)} docs | {latency:.1f}ms")
+        logger.info(f"[HYBRID][SUCCESS] {len(results)} docs | {latency:.1f}ms")
 
         return results
 
     except Exception as e:
-        logger.error(f"[Hybrid] failed: {e}")
+        logger.error(f"[HYBRID][FAIL] {e}")
         return []
 
 
