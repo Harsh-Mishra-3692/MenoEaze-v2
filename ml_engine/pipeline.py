@@ -1,9 +1,6 @@
-# pipeline.py — PRODUCTION SAFE (NO SILENT FAILURES)
+# pipeline.py — PRODUCTION v2 (FULLY FAULT-TOLERANT)
 
-import time
 import logging
-from typing import Dict, Any, Optional, List
-
 import numpy as np
 import torch
 
@@ -21,9 +18,6 @@ from ml_engine.db_client import get_user_weights, fetch_feedback_history
 from ml_engine.gating import select_strategy
 from ml_engine.doctor_recommender import recommend_doctor
 
-from ml_engine.build_features import build_feature_vector as build_features
-from ml_engine.longitudinal_builder import build_sequence_for_inference
-
 logger = logging.getLogger("menoeaze.pipeline")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,26 +25,22 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 SEQ_LEN = 5
 EXPECTED_FEATURES = 56
 ACCEPTED_FEATURES = (11, 56)
-MAX_QUERY_LENGTH = 500
 
 
 # ───────── INIT ─────────
 _model, _meta = load_model()
-if _model:
-    _model.to(DEVICE)
-    _model.eval()
-    _adapter = PersonalizationAdapter(_model)
-else:
+
+if not _model:
     raise RuntimeError("MODEL FAILED TO LOAD")
 
+_model.to(DEVICE)
+_model.eval()
+
+_adapter = PersonalizationAdapter(_model)
 _llm = LLMClient()
 
 
-# ───────── UTILS ─────────
-def _sanitize_query(q: Optional[str]) -> str:
-    return q.strip()[:MAX_QUERY_LENGTH] if isinstance(q, str) else ""
-
-
+# ───────── SAFE UTILS ─────────
 def _clamp(x):
     try:
         return float(max(0.0, min(1.0, float(x))))
@@ -66,7 +56,7 @@ def _validate_sequence(seq):
         raise ValueError("Invalid sequence length")
 
     if not np.isfinite(seq).all():
-        raise ValueError("Non-finite values in sequence")
+        raise ValueError("Non-finite values")
 
     if seq.shape[1] == EXPECTED_FEATURES:
         return seq.astype(np.float32)
@@ -79,12 +69,8 @@ def _validate_sequence(seq):
     raise ValueError("Invalid feature dimension")
 
 
-# ───────── PREDICT ─────────
+# ───────── MODEL ─────────
 def predict(sequence, user_id):
-
-    if _adapter is None:
-        raise RuntimeError("Model adapter not initialized")
-
     seq = _validate_sequence(sequence)
 
     x = torch.tensor(seq).unsqueeze(0).to(DEVICE)
@@ -97,9 +83,6 @@ def predict(sequence, user_id):
 
     out = _adapter.predict(x, weights)
 
-    if not isinstance(out, dict):
-        raise RuntimeError("Invalid model output")
-
     return {
         "severity": _clamp(out.get("severity")),
         "confidence": _clamp(out.get("confidence", 0.5)),
@@ -107,42 +90,72 @@ def predict(sequence, user_id):
     }
 
 
-# ───────── RAG ─────────
+# ───────── SAFE LLM FALLBACK ─────────
+def _llm_fallback(query):
+    try:
+        res = _llm.generate(query)
+        return res.get("text", "Unable to generate response.")
+    except Exception as e:
+        logger.error(f"LLM fallback failed: {e}")
+        return "I'm unable to generate a detailed response right now. Please consult a healthcare professional."
+
+
+# ───────── SAFE RAG ─────────
 def rag(query, severity, user_id, trend_meta):
 
-    docs = hybrid_retrieve(query, user_id=user_id)
+    try:
+        docs = hybrid_retrieve(query, user_id=user_id)
+    except Exception as e:
+        logger.error(f"Retriever failed: {e}")
+        docs = []
+
+    # 🔥 FIX: NO HARD FAIL
     if not docs:
-        raise RuntimeError("No documents retrieved")
+        logger.warning("No documents retrieved → fallback LLM")
 
-    docs = rerank(query, docs)
+        return {
+            "answer": _llm_fallback(query),
+            "sources": [],
+            "confidence": 0.4
+        }, {
+            "confidence_adjusted": 0.3
+        }
 
-    raw = generate_answer(query, severity, docs, None, _llm, trend_meta=trend_meta)
+    try:
+        docs = rerank(query, docs)
+    except Exception as e:
+        logger.error(f"Rerank failed: {e}")
 
-    if not isinstance(raw, dict):
-        raise RuntimeError("Invalid LLM output")
+    try:
+        raw = generate_answer(query, severity, docs, None, _llm, trend_meta=trend_meta)
+    except Exception as e:
+        logger.error(f"RAG generation failed: {e}")
+        return {
+            "answer": _llm_fallback(query),
+            "sources": [],
+            "confidence": 0.4
+        }, {
+            "confidence_adjusted": 0.3
+        }
 
     ctx = [d.get("content", "") for d in docs]
 
-    eval_res = evaluate_rag(
-        query=query,
-        answer=raw.get("answer", ""),
-        retrieved_docs=ctx,
-        context_docs=ctx,
-        base_confidence=raw.get("confidence", 0.5)
-    )
+    try:
+        eval_res = evaluate_rag(
+            query=query,
+            answer=raw.get("answer", ""),
+            retrieved_docs=ctx,
+            context_docs=ctx,
+            base_confidence=raw.get("confidence", 0.5)
+        )
+    except Exception:
+        eval_res = {}
 
-    return raw, eval_res or {}
+    return raw, eval_res
 
 
-# ───────── MAIN PIPELINE ─────────
+# ───────── MAIN ─────────
 def full_pipeline(user_id, query, sequence, user_history):
-
-    if not user_id:
-        raise ValueError("Invalid user")
-
-    query = _sanitize_query(query)
-
-    signal = extract_user_signal(user_id) or {}
 
     pred = predict(sequence, user_id)
 
@@ -157,11 +170,15 @@ def full_pipeline(user_id, query, sequence, user_history):
 
     rag_conf = _clamp(eval_res.get("confidence_adjusted", 0.3))
 
-    confidence = _clamp(0.4 * pred["confidence"] + 0.3 * trust + 0.3 * rag_conf)
+    confidence = _clamp(
+        0.4 * pred["confidence"] +
+        0.3 * trust +
+        0.3 * rag_conf
+    )
 
     doctor = recommend_doctor(
         severity=severity,
-        trend=signal.get("trend"),
+        trend=None,
         history=user_history or [],
         query=query,
         confidence=confidence
