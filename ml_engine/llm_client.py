@@ -1,9 +1,9 @@
-# llm_client.py — PRODUCTION v5 (STABLE + FALLBACK SAFE)
+# llm_client.py — PRODUCTION FIXED (RAILWAY SAFE + NO CRASH)
 
 import os
 import time
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 from groq import Groq
 
@@ -16,19 +16,31 @@ class LLMClient:
         self.api_key = os.getenv("GROQ_API_KEY")
 
         if not self.api_key:
-            logger.error("❌ GROQ_API_KEY missing")
-
-        self.client = Groq(api_key=self.api_key)
+            logger.error("❌ GROQ_API_KEY missing → LLM disabled")
+            self.client = None
+        else:
+            try:
+                self.client = Groq(api_key=self.api_key)
+            except Exception as e:
+                logger.error(f"❌ Groq init failed: {e}")
+                self.client = None
 
         self.model = "llama3-70b-8192"
         self.temperature = 0.4
         self.max_tokens = 600
 
-    # ───────── CORE ─────────
+    # ───────── CORE SAFE ─────────
     def generate(self, prompt: str) -> Dict[str, Any]:
 
         if not prompt:
-            raise ValueError("Empty prompt")
+            return {"text": "", "fallback": True}
+
+        if not self.client:
+            logger.warning("⚠️ LLM client unavailable → fallback")
+            return {
+                "text": "Please consult a healthcare professional.",
+                "fallback": True
+            }
 
         try:
             start = time.time()
@@ -44,25 +56,39 @@ class LLMClient:
 
             latency = time.time() - start
 
+            if not text:
+                logger.warning("⚠️ Empty LLM response")
+                return {
+                    "text": "Please consult a healthcare professional.",
+                    "fallback": True
+                }
+
             return {
                 "text": text,
-                "latency": round(latency, 2)
+                "latency": round(latency, 2),
+                "fallback": False
             }
 
         except Exception as e:
-            logger.error(f"LLM failed: {e}")
-            raise
+            logger.error(f"❌ LLM failed: {e}")
 
-    # ───────── SAFE FALLBACK ─────────
+            return {
+                "text": "Please consult a healthcare professional.",
+                "fallback": True
+            }
+
+    # ───────── SAFE STRING ─────────
     def safe_generate(self, prompt: str) -> str:
-        try:
-            return self.generate(prompt)["text"]
-        except:
-            return "I'm unable to generate a detailed response right now. Please consult a healthcare professional."
+        res = self.generate(prompt)
+        return res.get("text", "")
 
     # ───────── HEALTH ─────────
     def health_check(self) -> bool:
+        if not self.client:
+            return False
+
         try:
-            return bool(self.generate("ping")["text"])
+            res = self.generate("Say OK")
+            return "ok" in res.get("text", "").lower()
         except:
             return False
