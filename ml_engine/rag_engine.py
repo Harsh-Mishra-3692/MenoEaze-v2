@@ -1,4 +1,4 @@
-# rag_engine.py — PRODUCTION FIXED (NO PLACEHOLDER RETURNS)
+# rag_engine.py — PRODUCTION v7 (L7/L9 HARDENED, DEPLOYMENT SAFE)
 
 import logging
 import re
@@ -11,6 +11,8 @@ MAX_CONTEXT_CHARS = 3200
 MAX_DOC_CHARS = 800
 MAX_QUERY_LENGTH = 300
 MAX_SOURCES = 5
+
+MIN_CONTEXT_THRESHOLD = 180
 
 
 # ─────────────────────────────────────────────
@@ -35,7 +37,10 @@ def _severity_label(severity: float) -> str:
 # ─────────────────────────────────────────────
 # CONTEXT BUILDER
 # ─────────────────────────────────────────────
-def _build_context(docs):
+def _build_context(docs: List[Dict[str, Any]]) -> str:
+    if not docs:
+        return ""
+
     seen_sources = set()
     blocks = []
     total = 0
@@ -70,59 +75,100 @@ def _build_context(docs):
 # PROMPT BUILDER
 # ─────────────────────────────────────────────
 def _build_prompt(query, level, symptoms, context, trend_meta=None):
+
     trend_str = (
-        f"- direction: {trend_meta['direction']}\n- variability: {trend_meta['variability']}"
-        if trend_meta else "No trend data available."
+        f"- direction: {trend_meta.get('direction')}\n- variability: {trend_meta.get('variability')}"
+        if isinstance(trend_meta, dict)
+        else "No trend data available."
     )
 
     return f"""
-You are a clinical AI assistant.
+You are a clinical decision-support assistant for menopause.
 
-User query:
+User Query:
 {query}
 
-Severity: {level}
+Severity Level:
+{level}
 
 Symptoms:
-{symptoms}
+{symptoms if symptoms else "Not explicitly provided"}
 
 Trend:
 {trend_str}
 
 Context:
-{context}
+{context if context else "General clinical knowledge may be applied."}
 
-Provide a helpful, medically safe, relevant answer.
-Do NOT say "analyzing".
-Be direct and useful.
+Instructions:
+- Provide a clear, medically grounded explanation
+- Do NOT hallucinate facts not supported by context
+- Do NOT say "analyzing"
+- Be concise but informative
 """
 
 
 # ─────────────────────────────────────────────
 # SAFE LLM CALL
 # ─────────────────────────────────────────────
-def _call_llm_safe(llm, prompt, query):
+def _call_llm_safe(llm, prompt: str, fallback_query: str) -> str:
+
     try:
         res = llm.generate(prompt)
 
-        if isinstance(res, str) and res.strip():
-            return res
-
+        # normalize output
         if isinstance(res, dict):
             text = res.get("text", "").strip()
-            if text:
-                return text
+        else:
+            text = str(res).strip()
 
-        # 🔥 fallback to simple query
-        return llm.generate(query)
+        if text:
+            return text
+
+        # fallback 1: simple query
+        res2 = llm.generate(fallback_query)
+        if isinstance(res2, dict):
+            return res2.get("text", "").strip()
+
+        return str(res2).strip()
 
     except Exception as e:
-        logger.warning(f"LLM failed: {e}")
+        logger.warning(f"[RAG] LLM primary failed: {e}")
 
         try:
-            return llm.generate(query)
-        except:
-            return "Please consult a healthcare professional for proper guidance."
+            res = llm.generate(fallback_query)
+            if isinstance(res, dict):
+                return res.get("text", "").strip()
+            return str(res).strip()
+        except Exception:
+            return _safe_default_message()
+
+
+# ─────────────────────────────────────────────
+# SAFE DEFAULT
+# ─────────────────────────────────────────────
+def _safe_default_message() -> str:
+    return (
+        "Your symptoms may be related to hormonal changes associated with menopause. "
+        "For a more accurate assessment and personalized guidance, please consult a qualified healthcare professional."
+    )
+
+
+# ─────────────────────────────────────────────
+# CONTEXT ENHANCEMENT (CRITICAL FOR RAILWAY)
+# ─────────────────────────────────────────────
+def _enhance_context_if_weak(context: str) -> str:
+
+    if len(context) >= MIN_CONTEXT_THRESHOLD:
+        return context
+
+    # inject minimal domain grounding
+    base_knowledge = (
+        "Menopause commonly involves symptoms such as hot flashes, sleep disturbances, "
+        "mood fluctuations, fatigue, and hormonal changes."
+    )
+
+    return context + "\n\n" + base_knowledge
 
 
 # ─────────────────────────────────────────────
@@ -139,27 +185,16 @@ def generate_answer(
 ):
 
     start = time.time()
-    level = _severity_label(severity)
-
-    query = _sanitize(query)
 
     try:
+        query = _sanitize(query)
+        level = _severity_label(severity)
+
+        # ───────── CONTEXT ─────────
         context = _build_context(docs)
+        context = _enhance_context_if_weak(context)
 
-        # fallback context if weak
-        if len(context) < 200:
-            try:
-                from ml_engine.db_client import fetch_table
-                fallback_rows = fetch_table("medical_documents", filters=None, limit=3)
-                extra = "\n".join(
-                    r.get("content", "")
-                    for r in (fallback_rows or [])
-                    if r.get("content")
-                )
-                context += "\n\n" + extra
-            except Exception as e:
-                logger.warning(f"Fallback context failed: {e}")
-
+        # ───────── SYMPTOMS ─────────
         symptom_text = ""
         if isinstance(symptoms, dict):
             symptom_text = ", ".join(
@@ -168,28 +203,32 @@ def generate_answer(
                 if v > 0.3
             )
 
+        # ───────── PROMPT ─────────
         prompt = _build_prompt(query, level, symptom_text, context, trend_meta)
 
-        # 🔥 ALWAYS SAFE CALL
+        # ───────── LLM ─────────
         answer = _call_llm_safe(llm_client, prompt, query)
 
-        # 🔥 HARD GUARD (no placeholder allowed)
+        # ───────── HARD GUARD ─────────
         if not answer or "analyzing" in answer.lower():
-            logger.warning("Detected bad answer → forcing fallback")
+            logger.warning("[RAG] Weak output detected → forcing fallback")
             answer = _call_llm_safe(llm_client, query, query)
 
-        # ───────── CONFIDENCE
-        retrieval_scores = [d.get("score", 0.5) for d in docs]
-        retrieval_conf = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.5
+        if not answer:
+            answer = _safe_default_message()
 
-        confidence = min(1.0, 0.8 * retrieval_conf + 0.2)
+        # ───────── CONFIDENCE ─────────
+        retrieval_scores = [d.get("score", 0.5) for d in docs] if docs else [0.5]
+        retrieval_conf = sum(retrieval_scores) / len(retrieval_scores)
+
+        confidence = min(1.0, 0.75 * retrieval_conf + 0.25)
 
         latency = int((time.time() - start) * 1000)
 
         sources = list({
-            d.get("document_name", "Unknown")
+            d.get("document_name") or d.get("source") or "Unknown"
             for d in docs[:MAX_SOURCES]
-        })
+        }) if docs else []
 
         return {
             "answer": answer.strip(),
@@ -202,9 +241,8 @@ def generate_answer(
     except Exception as e:
         logger.error(f"[RAG] fatal: {e}")
 
-        # 🔥 FINAL SAFE RESPONSE
         return {
-            "answer": _call_llm_safe(llm_client, query, query),
+            "answer": _safe_default_message(),
             "sources": [],
             "confidence": 0.3,
             "fallback": True
