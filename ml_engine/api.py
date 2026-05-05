@@ -1,4 +1,4 @@
-# api.py — PRODUCTION v7 (RAILWAY SAFE | FULL FEATURE PRESERVED)
+# api.py — PRODUCTION v8 (DEBUG ENABLED | RAILWAY SAFE)
 
 import time
 import asyncio
@@ -11,19 +11,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 
-# 🔥 SAFE IMPORT (works locally + Railway)
+# ─────────────────────────────────────────────
+# SAFE IMPORTS
+# ─────────────────────────────────────────────
 try:
     from ml_engine.pipeline import full_pipeline
     from ml_engine.db_client import (
         insert_symptom_log,
         fetch_recent_logs,
-        insert_prediction,
         insert_feedback,
-        insert_guardrail_log,
         get_client,
         get_user_stats
     )
-    from ml_engine.memory import add_prediction_context, get_full_history
+    from ml_engine.memory import get_full_history
     from ml_engine.trust_filter import compute_trust_single
     from ml_engine.logger import get_logger, set_request_id
     from ml_engine.personalization_trainer import update_personalization_from_feedback
@@ -32,13 +32,11 @@ except:
     from db_client import (
         insert_symptom_log,
         fetch_recent_logs,
-        insert_prediction,
         insert_feedback,
-        insert_guardrail_log,
         get_client,
         get_user_stats
     )
-    from memory import add_prediction_context, get_full_history
+    from memory import get_full_history
     from trust_filter import compute_trust_single
     from logger import get_logger, set_request_id
     from personalization_trainer import update_personalization_from_feedback
@@ -53,7 +51,7 @@ ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=[o.strip() for o in ALLOWED_ORIGINS],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,30 +62,25 @@ app.add_middleware(
 # ─────────────────────────────────────────────
 SEQ_LEN = 5
 FEATURES = 11
-PIPELINE_TIMEOUT = 8.0
+PIPELINE_TIMEOUT = 25.0   # 🔥 Increased for Railway
 MAX_QUERY_LEN = 500
-MIN_LOGS_REQUIRED = 5
 
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
-# DEMO MODE
 DEMO_MODE = True
 DEMO_USER_ID = "18c67edb-dd07-4317-979f-cfb346e118ec"
 
-# ─────────────────────────────────────────────
-# GLOBAL STATE
-# ─────────────────────────────────────────────
 MODEL_READY = False
 DB_READY = False
 
 # ─────────────────────────────────────────────
-# STARTUP (PRELOAD MODEL)
+# STARTUP
 # ─────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     global MODEL_READY, DB_READY
 
-    logger.info("Starting API...")
+    logger.info("🚀 Starting API...")
 
     try:
         await asyncio.to_thread(
@@ -98,9 +91,9 @@ async def startup_event():
             user_history=[]
         )
         MODEL_READY = True
-        logger.info("Model warmup complete")
-    except Exception:
-        logger.exception("Model warmup failed")
+        logger.info("✅ Model warmup complete")
+    except Exception as e:
+        logger.exception("❌ Model warmup failed")
         MODEL_READY = False
 
     try:
@@ -120,8 +113,8 @@ async def add_request_context(request: Request, call_next):
 
     try:
         response = await call_next(request)
-    except Exception:
-        logger.exception("[CRASH]")
+    except Exception as e:
+        logger.exception("🔥 REQUEST CRASH")
         raise
 
     latency = round((time.time() - start) * 1000, 2)
@@ -143,7 +136,7 @@ def health():
     }
 
 # ─────────────────────────────────────────────
-# AUTH (unchanged)
+# AUTH
 # ─────────────────────────────────────────────
 def extract_user_id(request: Request) -> str:
     if DEMO_MODE:
@@ -162,9 +155,6 @@ def extract_user_id(request: Request) -> str:
 class RunRequest(BaseModel):
     user_id: Optional[str] = None
     query: Optional[str] = None
-    sequence: Optional[Any] = None
-    action: Optional[str] = None
-    payload: Optional[Any] = None
 
 class LogRequest(BaseModel):
     user_id: Optional[str] = None
@@ -201,49 +191,38 @@ def _fallback_sequence():
     return np.full((SEQ_LEN, FEATURES), 0.5, dtype=np.float32)
 
 # ─────────────────────────────────────────────
-# MAIN ENDPOINT (/run)
+# MAIN (/run)
 # ─────────────────────────────────────────────
-_last_valid_cache = {}
-
 @app.post("/run")
 async def run(req: RunRequest, request: Request):
 
     start = time.time()
     user_id = _sanitize_text(req.user_id, 50) or DEMO_USER_ID
-
-    # 🔁 ACTION ROUTING (PRESERVED)
-    if req.action == "log":
-        return await log_symptom(LogRequest(**(req.payload or {})), request)
-
-    if req.action == "feedback":
-        return await feedback(FeedbackRequest(**(req.payload or {})), request)
-
-    if req.action == "stats":
-        return await stats(StatsRequest(**(req.payload or {})), request)
-
     query = _sanitize_text(req.query, MAX_QUERY_LEN)
 
     if not query or len(query) < 3:
         raise HTTPException(400, "Invalid query")
 
-    # Build sequence
-    logs = fetch_recent_logs(user_id)
-    seq = None
+    logger.info(f"🧠 Running pipeline | user={user_id} | query={query}")
 
-    if logs:
-        try:
+    # Sequence
+    try:
+        logs = fetch_recent_logs(user_id)
+        if logs:
             seq = np.array([l["feature_vector"] for l in logs[-5:]], dtype=np.float32)
-        except:
-            seq = None
-
-    if seq is None or seq.shape != (5, 11):
+        else:
+            seq = _fallback_sequence()
+    except Exception as e:
+        logger.exception("⚠️ Sequence build failed")
         seq = _fallback_sequence()
 
+    # History
     try:
         user_history = await asyncio.to_thread(get_full_history, user_id)
     except:
         user_history = []
 
+    # 🔥 PIPELINE EXECUTION
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
@@ -255,38 +234,42 @@ async def run(req: RunRequest, request: Request):
             ),
             timeout=PIPELINE_TIMEOUT
         )
-    except Exception:
-        logger.exception("Pipeline failure")
-        if user_id in _last_valid_cache:
-            return _last_valid_cache[user_id]
-        raise HTTPException(500, "Pipeline failed")
 
+    except asyncio.TimeoutError:
+        logger.error("⏱️ PIPELINE TIMEOUT")
+        return {
+            "status": "error",
+            "error": "Pipeline timeout",
+            "stage": "timeout"
+        }
+
+    except Exception as e:
+        logger.exception("🚨 PIPELINE FAILURE")
+        return {
+            "status": "error",
+            "error": str(e),
+            "stage": "pipeline"
+        }
+
+    # ───────── RESULT PARSE ─────────
     pred = result.get("prediction", {}) or {}
     rag = result.get("rag", {}) or {}
 
     sev = _clamp(pred.get("severity"))
     conf = _clamp(pred.get("confidence", 0.5))
 
-    trend = [sev] * 7
-
     final = {
         "status": "ok",
         "severity": sev,
         "confidence": conf,
-        "trend": trend,
+        "trend": [sev] * 7,
         "trend_summary": result.get("trend_summary", ""),
         "answer": rag.get("answer", ""),
         "citations": rag.get("sources", []),
-
-        "prediction": {
-            "severity": sev,
-            "confidence": conf
-        },
-        "rag": rag,
         "latency_ms": int((time.time() - start) * 1000)
     }
 
-    _last_valid_cache[user_id] = final
+    logger.info("✅ Pipeline success")
     return final
 
 # ─────────────────────────────────────────────
