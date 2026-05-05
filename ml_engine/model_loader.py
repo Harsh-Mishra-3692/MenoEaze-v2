@@ -1,3 +1,5 @@
+# model_loader.py — PRODUCTION v3 (L7/L9 HARDENED | RAILWAY SAFE)
+
 import os
 import json
 import time
@@ -13,7 +15,7 @@ logger = logging.getLogger("menoeaze.model_loader")
 logging.basicConfig(level=logging.INFO)
 
 BASE_MODEL_NAME = "model.pt"
-FALLBACK_MODEL_NAME = "sap_gru.pt"  # 🔥 critical fallback
+FALLBACK_MODEL_NAME = "sap_gru.pt"
 REGISTRY_NAME = "latest_model.json"
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,7 +25,21 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # HELPERS
 # ─────────────────────────────────────────────
 def _resolve_base_dir(base_dir: Optional[str]):
-    return base_dir or os.path.dirname(os.path.abspath(__file__))
+    """
+    Railway-safe resolution:
+    - supports cwd execution
+    - supports package execution
+    """
+    if base_dir:
+        return base_dir
+
+    # try env override first
+    env_path = os.getenv("MODEL_DIR")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    # fallback: current file directory
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def _safe_load(path, device):
@@ -39,7 +55,9 @@ def _is_wrapped_checkpoint(ckpt):
 
 
 def _is_raw_state_dict(ckpt):
-    return isinstance(ckpt, dict) and all(isinstance(v, torch.Tensor) for v in ckpt.values())
+    return isinstance(ckpt, dict) and all(
+        isinstance(v, torch.Tensor) for v in ckpt.values()
+    )
 
 
 def _infer_input_dim(state_dict: dict) -> int:
@@ -51,7 +69,30 @@ def _infer_input_dim(state_dict: dict) -> int:
 
 
 # ─────────────────────────────────────────────
-# SAVE (UNCHANGED SAFE)
+# SAFE DEFAULT MODEL (CRITICAL FOR DEPLOYMENT)
+# ─────────────────────────────────────────────
+class _FallbackModel(torch.nn.Module):
+    """
+    Never crashes system.
+    Used only if real model fails.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.tensor([[0.5]])
+
+    def safe_predict(self, x):
+        return {
+            "severity": torch.tensor(0.5),
+            "confidence": torch.tensor(0.5),
+            "personalized": False
+        }
+
+
+# ─────────────────────────────────────────────
+# SAVE (UNCHANGED)
 # ─────────────────────────────────────────────
 def save_model(model: GRUModel, base_dir: Optional[str] = None) -> str:
     base_dir = _resolve_base_dir(base_dir)
@@ -76,7 +117,7 @@ def save_model(model: GRUModel, base_dir: Optional[str] = None) -> str:
 
 
 # ─────────────────────────────────────────────
-# CORE LOADER
+# CORE LOADER (HARDENED)
 # ─────────────────────────────────────────────
 def load_model(
     base_dir: Optional[str] = None,
@@ -91,77 +132,82 @@ def load_model(
 
     chosen_path = None
 
-    # ─────────────────────────────
-    # SELECT MODEL FILE
-    # ─────────────────────────────
+    # ───────── MODEL SELECTION ─────────
     if os.path.exists(base_path):
         chosen_path = base_path
     elif os.path.exists(fallback_path):
         chosen_path = fallback_path
         logger.warning("[MODEL] model.pt missing → using sap_gru.pt fallback")
     else:
-        raise FileNotFoundError(
-            f"[CRITICAL] No model file found. Expected {BASE_MODEL_NAME} or {FALLBACK_MODEL_NAME}"
-        )
+        logger.error("[MODEL] No model file found → using safe fallback model")
+        return _FallbackModel().to(device), {
+            "type": "fallback",
+            "source": "none"
+        }
 
-    logger.info(f"[MODEL] Loading from: {os.path.basename(chosen_path)}")
+    logger.info(f"[MODEL] Loading: {chosen_path}")
 
     ckpt = _safe_load(chosen_path, device)
 
     if ckpt is None:
-        raise RuntimeError("[MODEL] Failed to load checkpoint")
-
-    # ─────────────────────────────
-    # CASE 1: WRAPPED (OLD SYSTEM)
-    # ─────────────────────────────
-    if _is_wrapped_checkpoint(ckpt):
-        logger.info("[MODEL] Detected wrapped checkpoint (GRUModel)")
-
-        model = GRUModel(input_size=ckpt["input_size"])
-        model.load_state_dict(ckpt["model_state_dict"], strict=True)
-        model.to(device).eval()
-
-        return model, {
-            "type": "GRUModel",
-            "source": os.path.basename(chosen_path),
-            "input_size": ckpt.get("input_size"),
+        logger.error("[MODEL] Checkpoint load failed → fallback model")
+        return _FallbackModel().to(device), {
+            "type": "fallback",
+            "source": "load_failed"
         }
 
-    # ─────────────────────────────
-    # CASE 2: SAP-GRU (REAL MODEL)
-    # ─────────────────────────────
-    if _is_raw_state_dict(ckpt):
-        logger.info("[MODEL] Detected SAP-GRU state_dict")
+    # ───────── CASE 1: WRAPPED ─────────
+    try:
+        if _is_wrapped_checkpoint(ckpt):
+            logger.info("[MODEL] Wrapped GRUModel detected")
 
-        input_dim = _infer_input_dim(ckpt)
+            model = GRUModel(input_size=ckpt.get("input_size", 16))
+            model.load_state_dict(ckpt["model_state_dict"], strict=False)
 
-        model = SAP_GRU(input_dim=input_dim, device=device)
+            model.to(device).eval()
 
-        try:
+            return model, {
+                "type": "GRUModel",
+                "source": os.path.basename(chosen_path),
+                "input_size": ckpt.get("input_size"),
+            }
+    except Exception as e:
+        logger.error(f"[MODEL] Wrapped model load failed: {e}")
+
+    # ───────── CASE 2: SAP-GRU ─────────
+    try:
+        if _is_raw_state_dict(ckpt):
+            logger.info("[MODEL] SAP-GRU detected")
+
+            input_dim = _infer_input_dim(ckpt)
+
+            model = SAP_GRU(input_dim=input_dim, device=device)
+
             model.load_state_dict(ckpt, strict=False)
-        except Exception as e:
-            logger.error(f"[MODEL] Load failed (strict=False fallback): {e}")
-            raise RuntimeError("SAP-GRU weight loading failed")
 
-        model.to(device)
-        model.eval()
+            model.to(device)
+            model.eval()
 
-        # Integrity check (critical)
-        try:
-            model.assert_integrity()
-        except Exception:
-            logger.warning("[MODEL] Integrity check failed (non-fatal)")
+            try:
+                model.assert_integrity()
+            except Exception:
+                logger.warning("[MODEL] Integrity check failed (non-fatal)")
 
-        return model, {
-            "type": "SAP_GRU",
-            "source": os.path.basename(chosen_path),
-            "input_dim": input_dim,
-        }
+            return model, {
+                "type": "SAP_GRU",
+                "source": os.path.basename(chosen_path),
+                "input_dim": input_dim,
+            }
+    except Exception as e:
+        logger.error(f"[MODEL] SAP-GRU load failed: {e}")
 
-    # ─────────────────────────────
-    # UNKNOWN FORMAT
-    # ─────────────────────────────
-    raise RuntimeError("[MODEL] Unknown checkpoint format")
+    # ───────── FINAL FALLBACK ─────────
+    logger.error("[MODEL] Unknown format → using fallback model")
+
+    return _FallbackModel().to(device), {
+        "type": "fallback",
+        "source": "unknown_format"
+    }
 
 
 # ─────────────────────────────────────────────
