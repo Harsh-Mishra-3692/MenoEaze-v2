@@ -6,7 +6,7 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import ChatHeader from "./ChatHeader"
 import CitationCard, { Citation } from "./CitationCard"
-import { Send, Sparkles, ArrowDown, Loader2 } from "lucide-react"
+import { Send, Sparkles, ArrowDown } from "lucide-react"
 import { askAssistant } from "@/lib/mlClient"
 
 /* ================= TYPES ================= */
@@ -16,7 +16,7 @@ interface Message {
   content: string
   timestamp: Date
   citations?: Citation[]
-  degradedReasons?: string[]
+  degraded?: boolean
 }
 
 interface Props {
@@ -26,18 +26,18 @@ interface Props {
 
 const SUGGESTIONS = [
   "What are common perimenopause symptoms?",
-  "How does sleep quality affect menopause?",
-  "Tips for managing hot flashes naturally",
-  "How does mood change during menopause?"
+  "How does sleep affect menopause?",
+  "How to manage hot flashes naturally?",
+  "Why am I feeling mood swings?"
 ]
 
 /* ================= COMPONENT ================= */
 
 export default function AssistantChat({ userId, userEmail }: Props) {
+
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState("")
   const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [showScrollBtn, setShowScrollBtn] = useState(false)
 
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -48,23 +48,18 @@ export default function AssistantChat({ userId, userEmail }: Props) {
   const activeRequest = useRef(0)
 
   useEffect(() => {
-    isMounted.current = true
-    return () => {
-      isMounted.current = false
-    }
+    return () => { isMounted.current = false }
   }, [])
 
-  /* ================= SAFE SCROLL ================= */
+  /* ================= SCROLL ================= */
 
-  const scrollToBottom = useCallback((smooth = true) => {
-    messagesEndRef.current?.scrollIntoView({
-      behavior: smooth ? "smooth" : "auto"
-    })
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [])
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [messages])
 
   useEffect(() => {
     const container = messagesContainerRef.current
@@ -79,84 +74,94 @@ export default function AssistantChat({ userId, userEmail }: Props) {
     return () => container.removeEventListener("scroll", handleScroll)
   }, [])
 
-  /* ================= RESPONSE NORMALIZER ================= */
+  /* ================= SAFE RESPONSE ================= */
 
-  const normalizeResponse = (data: any) => {
-    const safeText =
-      typeof data?.reply === "string" && data.reply.trim().length > 0
-        ? data.reply
-        : "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights..."
+  const extractSafeResponse = (res: any) => {
+    const text =
+      res?.reply ||
+      res?.answer ||
+      ""
 
-    return {
-      content: safeText,
-      citations: Array.isArray(data?.citations) ? data.citations : [],
-      degradedReasons: Array.isArray(data?.degradedReasons)
-        ? data.degradedReasons
-        : undefined
+    if (typeof text === "string" && text.trim().length > 20) {
+      return text.trim()
     }
+
+    return "Your symptoms may be related to hormonal changes during menopause. For accurate guidance, consult a healthcare professional."
+  }
+
+  const extractCitations = (res: any): Citation[] => {
+    const raw = res?.citations || []
+
+    if (!Array.isArray(raw)) return []
+
+    return raw.map((c: any) =>
+      typeof c === "string"
+        ? { title: c, snippet: "", url: undefined }
+        : {
+            title: c?.title || "Clinical Source",
+            snippet: c?.snippet || "",
+            url: c?.url
+          }
+    )
   }
 
   /* ================= SEND ================= */
 
-  const sendMessage = useCallback(
-    async (text?: string) => {
-      const messageText = (text || input).trim()
+  const sendMessage = useCallback(async (text?: string) => {
 
-      if (!messageText || loading) return
+    const messageText = (text || input).trim()
+    if (!messageText || loading) return
 
-      const requestId = ++activeRequest.current
-      setError(null)
+    const requestId = ++activeRequest.current
 
-      const userMessage: Message = {
-        role: "user",
-        content: messageText,
-        timestamp: new Date()
+    const userMessage: Message = {
+      role: "user",
+      content: messageText,
+      timestamp: new Date()
+    }
+
+    setMessages(prev => [...prev, userMessage])
+    setInput("")
+    setLoading(true)
+
+    try {
+      const res = await askAssistant(messageText, userId)
+
+      if (requestId !== activeRequest.current) return
+
+      const assistantMessage: Message = {
+        role: "assistant",
+        content: extractSafeResponse(res),
+        timestamp: new Date(),
+        citations: extractCitations(res),
+        degraded: res?.degraded === true
       }
 
-      setMessages(prev => [...prev, userMessage])
-      setInput("")
-      setLoading(true)
-
-      if (inputRef.current) inputRef.current.style.height = "auto"
-      try {
-        const mlResponse = await askAssistant(messageText, userId)
-
-        // Ignore stale responses
-        if (requestId !== activeRequest.current) return
-
-        const assistantMessage: Message = {
-          role: "assistant",
-          content: mlResponse.answer || "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights...",
-          timestamp: new Date(),
-          citations: Array.isArray((mlResponse.raw as any)?.citations) ? (mlResponse.raw as any).citations : [],
-          degradedReasons: undefined
-        }
-
-        if (isMounted.current) {
-          setMessages(prev => [...prev, assistantMessage])
-        }
-
-      } catch (err: any) {
-        if (!isMounted.current) return
-
-        const fallbackMessage: Message = {
-          role: "assistant",
-          content: "System encountered a delay but your data has been received. Please consult your physician if your symptoms are severe.",
-          timestamp: new Date(),
-          degradedReasons: ["network"]
-        }
-
-        setMessages(prev => [...prev, fallbackMessage])
-        setError(err?.message || "Request failed")
-      } finally {
-        if (isMounted.current) {
-          setLoading(false)
-          inputRef.current?.focus()
-        }
+      if (isMounted.current) {
+        setMessages(prev => [...prev, assistantMessage])
       }
-    },
-    [input, loading, userId]
-  )
+
+    } catch (err) {
+
+      if (!isMounted.current) return
+
+      const fallbackMessage: Message = {
+        role: "assistant",
+        content: "Unable to retrieve a detailed response at the moment. Please try again.",
+        timestamp: new Date(),
+        degraded: true
+      }
+
+      setMessages(prev => [...prev, fallbackMessage])
+
+    } finally {
+      if (isMounted.current) {
+        setLoading(false)
+        inputRef.current?.focus()
+      }
+    }
+
+  }, [input, loading, userId])
 
   /* ================= INPUT ================= */
 
@@ -167,9 +172,7 @@ export default function AssistantChat({ userId, userEmail }: Props) {
     }
   }
 
-  const handleTextareaInput = (
-    e: React.ChangeEvent<HTMLTextAreaElement>
-  ) => {
+  const handleTextareaInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
 
     const el = e.target
@@ -182,31 +185,24 @@ export default function AssistantChat({ userId, userEmail }: Props) {
   /* ================= UI ================= */
 
   return (
-    <div className="flex flex-col h-[100dvh] bg-[#0a0a0f] text-white overflow-hidden">
+    <div className="flex flex-col h-[100dvh] bg-[#0a0a0f] text-white">
 
       <ChatHeader userEmail={userEmail} />
 
-      <div
-        ref={messagesContainerRef}
-        className="flex-1 overflow-y-auto relative z-10"
-      >
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto">
+
         {isEmptyState ? (
           <WelcomeState onSuggestionClick={sendMessage} />
         ) : (
-          <div className="max-w-3xl mx-auto px-4 py-6 space-y-1">
-            <AnimatePresence mode="popLayout">
-              {messages.map((msg, idx) => (
-                <MessageBubble key={idx} message={msg} />
+          <div className="max-w-3xl mx-auto px-4 py-6 space-y-2">
+
+            <AnimatePresence>
+              {messages.map((msg, i) => (
+                <MessageBubble key={i} message={msg} />
               ))}
             </AnimatePresence>
 
             {loading && <TypingIndicator />}
-
-            {error && (
-              <div className="text-red-400 text-sm px-4">
-                {error}
-              </div>
-            )}
 
             <div ref={messagesEndRef} />
           </div>
@@ -214,37 +210,36 @@ export default function AssistantChat({ userId, userEmail }: Props) {
 
         {showScrollBtn && (
           <button
-            onClick={() => scrollToBottom()}
-            className="fixed bottom-28 left-1/2 -translate-x-1/2 w-9 h-9 rounded-full bg-white/10"
+            onClick={scrollToBottom}
+            className="fixed bottom-28 left-1/2 -translate-x-1/2"
           >
-            <ArrowDown size={16} />
+            <ArrowDown size={18} />
           </button>
         )}
+
       </div>
 
-      <div className="border-t border-white/[0.06] bg-[#0a0a0f]/80">
-        <div className="max-w-3xl mx-auto px-4 py-4">
-          <div className="flex items-end gap-3 bg-white/[0.05] rounded-2xl px-4 py-3">
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={input}
-              onChange={handleTextareaInput}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask about menopause..."
-              disabled={loading}
-              className="flex-1 bg-transparent text-white text-sm resize-none outline-none"
-            />
-            <button
-              onClick={() => sendMessage()}
-              disabled={!input.trim() || loading}
-              className="w-9 h-9 bg-purple-600 rounded-xl"
-            >
-              <Send size={16} />
-            </button>
-          </div>
+      <div className="border-t border-white/10 p-4">
+        <div className="flex gap-3 bg-white/5 rounded-xl p-3">
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={handleTextareaInput}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask about menopause..."
+            disabled={loading}
+            className="flex-1 bg-transparent outline-none resize-none"
+          />
+          <button
+            onClick={() => sendMessage()}
+            disabled={!input.trim() || loading}
+            className="bg-purple-600 px-3 rounded-lg"
+          >
+            <Send size={16} />
+          </button>
         </div>
       </div>
+
     </div>
   )
 }
@@ -270,6 +265,7 @@ function MessageBubble({ message }: { message: Message }) {
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div className="max-w-[80%] p-3 rounded-xl">
+
         {isUser ? (
           message.content
         ) : (
@@ -283,11 +279,12 @@ function MessageBubble({ message }: { message: Message }) {
             ))}
           </>
         )}
+
       </div>
     </div>
   )
 }
 
 function TypingIndicator() {
-  return <div className="text-gray-400">...</div>
+  return <div className="text-gray-400">Thinking...</div>
 }
