@@ -1,185 +1,68 @@
-# llm_client.py — PRODUCTION v4 (RAILWAY SAFE + NO SILENT FALLBACK)
+# llm_client.py — PRODUCTION v5 (STABLE + FALLBACK SAFE)
 
 import os
 import time
 import logging
-import uuid
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional
 
-from ml_engine.config import CONFIG
-
-try:
-    from groq import Groq
-except ImportError:
-    raise ImportError("groq package not installed. Run: pip install groq")
+from groq import Groq
 
 logger = logging.getLogger("menoeaze.llm")
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
-LLM_CFG = CONFIG["llm"]
 
-MAX_RETRIES = 3
-TIMEOUT_SECONDS = 25   # 🔥 increased for Railway
-BACKOFF_BASE = 1.8
-
-CIRCUIT_BREAK_THRESHOLD = 5
-CIRCUIT_RESET_TIME = 60
-
-MAX_PROMPT_CHARS = 12000
-
-
-# ─────────────────────────────────────────────
-# CLIENT
-# ─────────────────────────────────────────────
 class LLMClient:
-    def __init__(
-        self,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-    ):
-        # 🔥 FIX: ENV-FIRST strategy (Railway compatible)
-        self.api_key = (
-            api_key
-            or os.getenv("GROQ_API_KEY")
-            or getattr(LLM_CFG, "api_key", None)
-        )
 
-        self.model = model or LLM_CFG.model
-        self.temperature = LLM_CFG.temperature
-        self.max_tokens = LLM_CFG.max_tokens
-
-        # 🔥 visibility
-        logger.info(f"[LLM] API KEY PRESENT: {bool(self.api_key)}")
+    def __init__(self):
+        self.api_key = os.getenv("GROQ_API_KEY")
 
         if not self.api_key:
-            logger.error("[LLM] GROQ_API_KEY missing — LLM disabled")
+            logger.error("❌ GROQ_API_KEY missing")
 
-        self._client = None
+        self.client = Groq(api_key=self.api_key)
 
-        # circuit breaker
-        self._fail_count = 0
-        self._last_fail_time = 0
+        self.model = "llama3-70b-8192"
+        self.temperature = 0.4
+        self.max_tokens = 600
 
-        logger.info(f"[LLM] Initialized | model={self.model}")
+    # ───────── CORE ─────────
+    def generate(self, prompt: str) -> Dict[str, Any]:
 
-    # ─────────────────────────────────────────
-    # CLIENT INIT
-    # ─────────────────────────────────────────
-    def _get_client(self):
-        if not self.api_key:
-            raise RuntimeError("GROQ_API_KEY not configured")
-
-        if self._client is None:
-            self._client = Groq(api_key=self.api_key)
-
-        return self._client
-
-    # ─────────────────────────────────────────
-    # CIRCUIT BREAKER
-    # ─────────────────────────────────────────
-    def _circuit_open(self) -> bool:
-        if self._fail_count < CIRCUIT_BREAK_THRESHOLD:
-            return False
-
-        if time.time() - self._last_fail_time > CIRCUIT_RESET_TIME:
-            self._fail_count = 0
-            return False
-
-        return True
-
-    # ─────────────────────────────────────────
-    # PROMPT SAFETY
-    # ─────────────────────────────────────────
-    def _sanitize_prompt(self, prompt: str) -> str:
         if not prompt:
-            return ""
-        return prompt[:MAX_PROMPT_CHARS]
-
-    # ─────────────────────────────────────────
-    # CORE GENERATION
-    # ─────────────────────────────────────────
-    def generate(
-        self,
-        prompt: str,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> Dict[str, Any]:
-
-        request_id = str(uuid.uuid4())[:8]
-
-        if not prompt or not prompt.strip():
             raise ValueError("Empty prompt")
 
-        if self._circuit_open():
-            raise RuntimeError("LLM circuit breaker open")
+        try:
+            start = time.time()
 
-        prompt = self._sanitize_prompt(prompt)
+            res = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+            )
 
-        temp = temperature if temperature is not None else self.temperature
-        max_toks = max_tokens if max_tokens is not None else self.max_tokens
+            text = res.choices[0].message.content.strip()
 
-        attempt = 0
+            latency = time.time() - start
 
-        while attempt < MAX_RETRIES:
-            try:
-                client = self._get_client()
+            return {
+                "text": text,
+                "latency": round(latency, 2)
+            }
 
-                start = time.time()
+        except Exception as e:
+            logger.error(f"LLM failed: {e}")
+            raise
 
-                response = client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=temp,
-                    max_tokens=max_toks,
-                    timeout=TIMEOUT_SECONDS,
-                )
+    # ───────── SAFE FALLBACK ─────────
+    def safe_generate(self, prompt: str) -> str:
+        try:
+            return self.generate(prompt)["text"]
+        except:
+            return "I'm unable to generate a detailed response right now. Please consult a healthcare professional."
 
-                latency = time.time() - start
-
-                text = response.choices[0].message.content.strip()
-
-                if not text:
-                    raise ValueError("Empty LLM response")
-
-                self._fail_count = 0
-
-                tokens_est = int(len(text) / 4)
-
-                logger.info(
-                    f"[LLM] success | req={request_id} | latency={latency:.2f}s | tokens≈{tokens_est}"
-                )
-
-                return {
-                    "text": text,
-                    "latency": round(latency, 3),
-                    "tokens_est": tokens_est,
-                    "request_id": request_id,
-                }
-
-            except Exception as e:
-                attempt += 1
-                self._fail_count += 1
-                self._last_fail_time = time.time()
-
-                wait = min(10, BACKOFF_BASE ** attempt)
-
-                logger.warning(
-                    f"[LLM] fail | req={request_id} | attempt={attempt} | error={str(e)} | retry={wait:.1f}s"
-                )
-
-                time.sleep(wait)
-
-        # 🔥 CRITICAL CHANGE: NO FALLBACK
-        raise RuntimeError("LLM failed after retries")
-
-    # ─────────────────────────────────────────
-    # HEALTH CHECK
-    # ─────────────────────────────────────────
+    # ───────── HEALTH ─────────
     def health_check(self) -> bool:
         try:
-            res = self.generate("ping", max_tokens=5)
-            return bool(res.get("text"))
-        except Exception:
+            return bool(self.generate("ping")["text"])
+        except:
             return False
