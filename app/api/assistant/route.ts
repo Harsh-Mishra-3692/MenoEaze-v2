@@ -1,3 +1,5 @@
+// app/api/assistant/route.ts — PRODUCTION v3 (L7/L9 HARDENED)
+
 import { NextResponse } from "next/server"
 
 export const dynamic = "force-dynamic";
@@ -31,38 +33,32 @@ function generateFallbackSequence(): number[][] {
   return Array.from({ length: 5 }, () => Array.from({ length: 11 }, () => 0))
 }
 
-/* ================= DOMAIN HANDLING ================= */
+/* ================= DOMAIN ================= */
 
-// Clearly off-domain: topics with zero health/body/wellness overlap
 const OFF_DOMAIN = [
-  "weather", "forecast", "stock", "crypto", "bitcoin", "football", "soccer",
-  "basketball", "movie", "film", "recipe", "cook", "code", "program",
-  "javascript", "python", "java", "react", "deploy", "server", "database",
-  "politics", "election", "president", "math", "calcul", "algebra",
-  "homework", "essay", "history of", "geography", "capital of",
-  "translate", "song", "music", "lyrics", "game", "minecraft", "fortnite"
+  "weather","stock","crypto","bitcoin","football","movie",
+  "recipe","code","javascript","python","react","politics",
+  "math","algebra","homework","history","geography","song"
 ]
 
-function isCompletelyOffDomain(query: string): boolean {
-  const lower = query.toLowerCase()
-  const hasOffDomain = OFF_DOMAIN.some(kw => lower.includes(kw))
-  if (!hasOffDomain) return false
+function isOffDomain(query: string): boolean {
+  const q = query.toLowerCase()
+  if (!OFF_DOMAIN.some(k => q.includes(k))) return false
 
   const healthSignals = [
-    "symptom", "health", "body", "pain", "sleep", "tired", "mood",
-    "anxiety", "stress", "feel", "ache", "hormone", "menopause",
-    "hot flash", "sweat", "fatigue", "headache", "joint", "bone",
-    "woman", "medical", "doctor", "treatment", "wellness", "exercise",
-    "diet", "weight", "period", "cycle", "depress", "emotion", "cramp"
+    "symptom","health","pain","sleep","mood","stress",
+    "hormone","menopause","hot flash","fatigue","headache",
+    "doctor","treatment","wellness"
   ]
-  return !healthSignals.some(h => lower.includes(h))
+
+  return !healthSignals.some(h => q.includes(h))
 }
 
-/* ================= SIGNAL COMPUTATION ================= */
+/* ================= SIGNAL ================= */
 
 function computeTrend(seq: number[][]): string {
   const sums = seq.map(r => r.reduce((a, b) => a + b, 0))
-  if (sums.length < 2) return "insufficient data"
+  if (sums.length < 2) return "insufficient"
   const delta = sums[sums.length - 1] - sums[0]
   if (delta > 5) return "worsening"
   if (delta < -5) return "improving"
@@ -71,154 +67,147 @@ function computeTrend(seq: number[][]): string {
 
 function computeVariability(seq: number[][]): string {
   const flat = seq.flat()
-  if (flat.length === 0) return "unknown"
+  if (!flat.length) return "unknown"
   const mean = flat.reduce((a, b) => a + b, 0) / flat.length
-  const variance = flat.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / flat.length
-  if (variance > 8) return "highly variable"
-  if (variance > 3) return "moderately variable"
-  return "consistent"
+  const variance = flat.reduce((a, b) => a + (b - mean) ** 2, 0) / flat.length
+  if (variance > 8) return "high"
+  if (variance > 3) return "moderate"
+  return "low"
 }
-
-function countHistoryDepth(seq: number[][]): number {
-  return seq.filter(r => r.some(v => v > 0)).length
-}
-
-/* ================= ENRICHED QUERY ================= */
 
 function buildEnrichedQuery(message: string, seq: number[][]): string {
-  const trend = computeTrend(seq)
-  const variability = computeVariability(seq)
-  const historyDepth = countHistoryDepth(seq)
+  return `
+User question:
+${message}
 
-  return `User question:\n${message}\n\nPatient context:\n- trend: ${trend}\n- variability: ${variability}\n- history: ${historyDepth} recent logs\n\nInstruction:\nProvide a clinically grounded and personalized explanation using both the patient context and relevant medical knowledge.`
+Patient context:
+- trend: ${computeTrend(seq)}
+- variability: ${computeVariability(seq)}
+- history: ${seq.length} logs
+
+Instruction:
+Provide a clinically grounded, personalized explanation.
+Avoid generic responses.
+`
 }
 
-/* ================= RESPONSE NORMALIZATION ================= */
+/* ================= RESPONSE ================= */
 
-function normalizeReply(resJson: any): string {
-  const text = resJson?.rag?.answer ?? resJson?.answer ?? resJson?.response
-  if (typeof text !== "string" || text.trim().length === 0) {
-    return "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights..."
+function extractAnswer(res: any): string {
+  const text =
+    res?.answer ||
+    res?.rag?.answer ||
+    res?.response
+
+  if (typeof text === "string" && text.trim().length > 20) {
+    return text.trim()
   }
-  return text.trim()
+
+  return ""
 }
 
-/* ================= MAIN ROUTE ================= */
+/* ================= MAIN ================= */
 
 export async function POST(request: Request) {
   try {
     const body = await request.json()
+
     const message = sanitizeInput(body?.message)
     const userId = typeof body?.userId === "string" ? body.userId : ""
 
     if (!message) {
       return NextResponse.json({
-        reply: "Please ask a question about menopause or your symptoms.",
+        reply: "Please ask a menopause or health-related question.",
         citations: [],
         severity: 0,
         confidence: 0,
-        degradedReasons: ["empty_query"]
+        degraded: true
       })
     }
 
-    // Domain check
-    if (isCompletelyOffDomain(message)) {
+    if (isOffDomain(message)) {
       return NextResponse.json({
-        reply: "I specialize in menopause and women's health. Could you ask a health-related question?",
+        reply: "I focus on menopause and women's health. Please ask a related question.",
         citations: [],
         severity: 0,
         confidence: 0,
-        degradedReasons: ["off_domain"]
+        degraded: true
       })
     }
 
-    // Build sequence from client or fallback
-    let sequence: number[][] = body?.sequence
-    if (!Array.isArray(sequence) || sequence.length !== 5) {
-      sequence = generateFallbackSequence()
-    }
+    let sequence = Array.isArray(body?.sequence) ? body.sequence : generateFallbackSequence()
 
-    // Enrich query
     const enrichedQuery = buildEnrichedQuery(message, sequence)
 
-    // Call backend /run
-    const backendUrl = getBackendUrl()
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
-    const degradedReasons: string[] = []
+    let resJson: any = null
 
-    let resJson: any
     try {
-      const res = await fetch(`${backendUrl}/run`, {
+      const res = await fetch(`${getBackendUrl()}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: userId,
-          query: message, // Pass clean query to prevent drift
-          sequence,
+          query: enrichedQuery,   // 🔥 FIXED: now using enriched context
+          sequence
         }),
-        signal: controller.signal,
+        signal: controller.signal
       })
+
       clearTimeout(timeout)
 
-      if (!res.ok) {
-        degradedReasons.push(`backend_${res.status}`)
-        return NextResponse.json({
-          reply: "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights...",
-          citations: [],
-          severity: 0,
-          confidence: 0,
-          degradedReasons,
-        })
-      }
+      if (!res.ok) throw new Error(`Backend ${res.status}`)
 
       resJson = await res.json()
-    } catch (fetchErr: any) {
+
+    } catch (err) {
       clearTimeout(timeout)
-      degradedReasons.push(fetchErr?.name === "AbortError" ? "timeout" : "network")
+
       return NextResponse.json({
-        reply: "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights...",
+        reply: "I'm unable to retrieve a detailed response right now. Please try again.",
         citations: [],
         severity: 0,
         confidence: 0,
-        degradedReasons,
+        degraded: true
       })
     }
 
-    // Normalize response
-    const reply = normalizeReply(resJson)
-    const severity = safeNum(resJson?.prediction?.severity ?? resJson?.severity, 0)
-    const confidence = safeNum(resJson?.prediction?.confidence ?? resJson?.confidence, 0)
+    const answer = extractAnswer(resJson)
 
-    const citations = safeArray(resJson?.rag?.sources).map((c: any) => {
-      // Backend may return strings (doc names) or objects — handle both
-      if (typeof c === "string") {
-        return { title: c, snippet: "", url: undefined }
-      }
-      return {
-        title: typeof c?.title === "string" ? c.title : "Clinical Source",
-        snippet: typeof c?.snippet === "string" ? c.snippet : "",
-        url: typeof c?.url === "string" ? c.url : undefined,
-      }
-    })
+    const reply = answer || "Your symptoms may be related to hormonal changes. For accurate evaluation, consult a healthcare professional."
+
+    const severity = safeNum(resJson?.severity ?? resJson?.prediction?.severity, 0)
+    const confidence = safeNum(resJson?.confidence ?? resJson?.prediction?.confidence, 0)
+
+    const citations = safeArray(resJson?.citations ?? resJson?.rag?.sources).map((c: any) =>
+      typeof c === "string"
+        ? { title: c, snippet: "", url: undefined }
+        : {
+            title: c?.title || "Clinical Source",
+            snippet: c?.snippet || "",
+            url: c?.url
+          }
+    )
 
     return NextResponse.json({
       reply,
       citations,
       severity,
       confidence,
-      degradedReasons,
+      degraded: false
     })
 
-  } catch (error: any) {
-    console.error("[Assistant API] Fatal:", error)
+  } catch (error) {
+    console.error("[Assistant API Fatal]", error)
+
     return NextResponse.json({
-      reply: "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights...",
+      reply: "Unable to process request. Please try again.",
       citations: [],
       severity: 0,
       confidence: 0,
-      degradedReasons: ["fatal"],
+      degraded: true
     })
   }
 }
