@@ -1,3 +1,5 @@
+# ONLY safe, non-invasive improvements applied
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -13,7 +15,7 @@ from research.metrics_report import MetricsReporter
 
 
 # =========================================================
-# CONFIG
+# CONFIG (UNCHANGED)
 # =========================================================
 DATA_PATH = "data/processed/longitudinal_sequences.csv"
 MODEL_PATH = "sap_gru.pt"
@@ -32,7 +34,7 @@ RANK_SUBSAMPLE = 32
 
 
 # =========================================================
-# 🔥 REPRODUCIBILITY (FIXED)
+# 🔥 REPRODUCIBILITY (STRICT)
 # =========================================================
 def set_seed(seed):
     random.seed(seed)
@@ -45,27 +47,36 @@ def set_seed(seed):
 
 
 # =========================================================
+# SAFE SAVE (ATOMIC)
+# =========================================================
 def safe_save(obj, path):
     tmp = tempfile.NamedTemporaryFile(delete=False)
-    torch.save(obj, tmp.name)
-    tmp.close()
-    os.replace(tmp.name, path)
+    try:
+        torch.save(obj, tmp.name)
+        tmp.close()
+        os.replace(tmp.name, path)
+    finally:
+        if os.path.exists(tmp.name):
+            os.unlink(tmp.name)
 
 
 # =========================================================
 def save_metadata(best_val):
     meta = {
-        "timestamp": datetime.now(UTC).isoformat(),  # ✅ FIXED
+        "timestamp": datetime.now(UTC).isoformat(),
         "best_val_loss": float(best_val),
         "epochs": EPOCHS,
         "batch_size": BATCH_SIZE,
         "learning_rate": LR,
         "device": str(DEVICE)
     }
+
     with open(CHECKPOINT_META, "w") as f:
         json.dump(meta, f, indent=2)
 
 
+# =========================================================
+# SPLIT (UNCHANGED LOGIC)
 # =========================================================
 def split_data(seq, tgt, length, weight, val_ratio=0.1):
     idx = np.random.permutation(len(seq))
@@ -83,6 +94,8 @@ def split_data(seq, tgt, length, weight, val_ratio=0.1):
 
 
 # =========================================================
+# LOSSES (UNCHANGED)
+# =========================================================
 def weighted_mse(pred, target, weights):
     mask = torch.isfinite(target)
     if mask.sum() == 0:
@@ -92,10 +105,7 @@ def weighted_mse(pred, target, weights):
     return (weights * (pred - target) ** 2).mean()
 
 
-# =========================================================
 def ranking_loss(y_pred, y_true):
-
-    # 🔥 guard against low variance (important)
     if torch.std(y_true) < 1e-4:
         return torch.tensor(0.0, device=y_pred.device)
 
@@ -110,7 +120,6 @@ def ranking_loss(y_pred, y_true):
     return torch.mean((diff_pred - diff_true) ** 2)
 
 
-# =========================================================
 def get_rank_weight(epoch):
     if epoch < 5:
         return 0.0
@@ -120,6 +129,8 @@ def get_rank_weight(epoch):
         return 0.1
 
 
+# =========================================================
+# EMA (UNCHANGED)
 # =========================================================
 class EMA:
     def __init__(self, model, decay=0.99):
@@ -148,6 +159,8 @@ def validate_tensor(t):
     return torch.isfinite(t).all()
 
 
+# =========================================================
+# TRAIN (LOGGING + SAFETY ONLY)
 # =========================================================
 def train():
     set_seed(SEED)
@@ -194,7 +207,6 @@ def train():
 
     print(f"\nTraining on {len(X_train)} | Validation on {len(X_val)}\n")
 
-    # =========================================================
     for epoch in range(EPOCHS):
         model.train()
 
@@ -270,9 +282,7 @@ def train():
 
         train_loss = total_loss / max(steps, 1)
 
-        # =========================================================
-        # VALIDATION (NO RE-CREATION)
-        # =========================================================
+        # VALIDATION (UNCHANGED)
         model.eval()
         ema.apply_to(model)
 
@@ -293,7 +303,6 @@ def train():
 
         reporter.print_latest()
 
-        # =========================================================
         if val_loss < best_val:
             best_val = val_loss
             patience = 0

@@ -48,8 +48,8 @@ export default function CitationCard({ citation }: { citation: Citation }) {
 
                     {expanded && (
                         <p className="text-xs text-gray-500 mt-2 leading-relaxed border-t border-white/[0.04] pt-2">
-                            {citation.content.slice(0, 300)}
-                            {citation.content.length > 300 && "…"}
+                            {citation?.content?.slice?.(0, 300) || ""}
+                            {(citation?.content?.length || 0) > 300 && "…"}
                         </p>
                     )}
                 </div>

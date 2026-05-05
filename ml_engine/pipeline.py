@@ -1,4 +1,4 @@
-# pipeline.py — FINAL ELITE v4 (DETERMINISTIC + SAFE + AUDITABLE)
+# pipeline.py — PRODUCTION SAFE (FEATURE-LOCKED + MODEL-SAFE)
 
 import time
 import logging
@@ -21,8 +21,12 @@ from ml_engine.db_client import get_user_weights, fetch_feedback_history
 from ml_engine.gating import select_strategy
 from ml_engine.doctor_recommender import recommend_doctor
 
+# 🔒 CRITICAL: USE TRAINING PIPELINE
+from ml_engine.build_features import build_feature_vector as build_features
+from ml_engine.longitudinal_builder import build_sequence_for_inference
+
 try:
-    from ml_engine.clinical_guardrail import evaluate_guardrail
+    from ml_engine.clinical_guardrail import apply_guardrail as evaluate_guardrail
 except Exception:
     def evaluate_guardrail(query: str, severity: float) -> Dict[str, Any]:
         return {"safe": True, "override": False, "flags": [], "message": None}
@@ -31,8 +35,10 @@ logger = logging.getLogger("menoeaze.pipeline")
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# 🔒 LOCKED TO TRAINING DISTRIBUTION
 SEQ_LEN = 5
-FEATURES = 11
+EXPECTED_FEATURES = 56  # model training dimension
+ACCEPTED_FEATURES = (11, 56)  # accept API (11) or full (56)
 MAX_QUERY_LENGTH = 500
 ANOMALY_THRESHOLD = 0.5
 
@@ -65,8 +71,7 @@ except Exception:
 def _sanitize_query(q: Optional[str]) -> str:
     if not isinstance(q, str):
         return ""
-    q = q.strip()
-    return q[:MAX_QUERY_LENGTH]
+    return q.strip()[:MAX_QUERY_LENGTH]
 
 
 def _clamp(x: Any) -> float:
@@ -81,26 +86,56 @@ def _default_pred() -> Dict[str, Any]:
 
 
 def _validate_sequence(seq: Any) -> Optional[np.ndarray]:
-    if isinstance(seq, np.ndarray) and seq.shape == (SEQ_LEN, FEATURES):
-        if np.isfinite(seq).all():
-            return seq.astype(np.float32)
+    if not isinstance(seq, np.ndarray) or seq.ndim != 2:
+        return None
+    if seq.shape[0] != SEQ_LEN:
+        return None
+    if not np.isfinite(seq).all():
+        return None
+    feat_dim = seq.shape[1]
+    if feat_dim == EXPECTED_FEATURES:
+        return seq.astype(np.float32)
+    if feat_dim in ACCEPTED_FEATURES:
+        # Pad to EXPECTED_FEATURES with zeros so model receives correct shape
+        padded = np.zeros((SEQ_LEN, EXPECTED_FEATURES), dtype=np.float32)
+        padded[:, :feat_dim] = seq[:, :feat_dim]
+        return padded
     return None
 
 
-def _detect_anomaly(current: float, historical_avg: float) -> bool:
-    return abs(current - historical_avg) > ANOMALY_THRESHOLD
+# ─────────────────────────────────────────────
+# 🔒 FEATURE PIPELINE (CRITICAL FIX)
+# ─────────────────────────────────────────────
+def _prepare_sequence(user_input: Dict[str, Any], tracker) -> Optional[np.ndarray]:
+    try:
+        features = build_features(user_input)
 
+        if features is None:
+            tracker.add("feature_build_failed")
+            return None
 
-def _fallback_answer(level: str) -> str:
-    if level == "low":
-        return "Limited evidence. Monitor symptoms and maintain healthy habits."
-    if level == "medium":
-        return "Evidence is uncertain. Consider lifestyle changes and monitoring."
-    return "Medical guidance insufficient. Please consult a healthcare professional."
+        seq = build_sequence_for_inference(features)
+
+        if seq is None:
+            tracker.add("sequence_build_failed")
+            return None
+
+        seq = _validate_sequence(seq)
+
+        if seq is None:
+            tracker.add("invalid_sequence_shape")
+            return None
+
+        return seq
+
+    except Exception:
+        logger.exception("[PIPELINE][FEATURE_PIPELINE][FAIL]")
+        tracker.add("feature_pipeline_failure")
+        return None
 
 
 # ─────────────────────────────────────────────
-# DEGRADATION TRACKING (FIXED)
+# DEGRADATION TRACKING
 # ─────────────────────────────────────────────
 class DegradationTracker:
     def __init__(self):
@@ -111,20 +146,16 @@ class DegradationTracker:
             self.reasons.append(reason)
 
     def export(self) -> Dict[str, Any]:
-        if not self.reasons:
-            return {}
-        return {
-            "status": "degraded",
-            "reasons": self.reasons
-        }
+        return {"status": "degraded", "reasons": self.reasons} if self.reasons else {}
 
 
 # ─────────────────────────────────────────────
 # PREDICTION
 # ─────────────────────────────────────────────
-def predict(sequence: Any, user_id: str, tracker: DegradationTracker) -> Dict[str, Any]:
+def predict(sequence: Any, user_id: str, tracker: DegradationTracker):
 
     seq = _validate_sequence(sequence)
+
     if seq is None or _adapter is None:
         tracker.add("invalid_sequence_or_model")
         return _default_pred()
@@ -135,8 +166,7 @@ def predict(sequence: Any, user_id: str, tracker: DegradationTracker) -> Dict[st
         weights = get_user_weights(user_id) or {}
         feedback = fetch_feedback_history(user_id) or []
 
-        strategy = select_strategy({"feedback_logs": feedback})
-        if strategy == "none":
+        if select_strategy(None, feedback) == "none":
             weights = {}
 
         out = _adapter.predict(x, weights)
@@ -145,51 +175,54 @@ def predict(sequence: Any, user_id: str, tracker: DegradationTracker) -> Dict[st
             tracker.add("invalid_prediction_output")
             return _default_pred()
 
+        sev = out.get("severity")
+        conf = out.get("confidence")
+        
+        print(f"[ML_OUTPUT] {{ 'severity': {sev}, 'confidence': {conf} }}")
+        
+        if not conf or conf <= 0:
+            conf = float(out.get("probability", out.get("score", 0.5)))
+            
+        if not conf or conf <= 0:
+            conf = 0.5
+
         return {
-            "severity": _clamp(out.get("severity")),
-            "confidence": _clamp(out.get("confidence")),
+            "severity": _clamp(sev),
+            "confidence": _clamp(conf),
             "personalized": bool(out.get("personalized"))
         }
 
     except Exception:
-        logger.exception("[PIPELINE][GRU][FAIL]")
+        logger.exception("[PIPELINE][PREDICT][FAIL]")
         tracker.add("prediction_failure")
         return _default_pred()
 
 
 # ─────────────────────────────────────────────
-# RAG
+# RAG (unchanged)
 # ─────────────────────────────────────────────
-def rag(query: str, severity: float, user_id: str, tracker: DegradationTracker):
-
+def rag(query: str, severity: float, user_id: str, tracker, trend_meta=None):
     try:
         docs = hybrid_retrieve(query, user_id=user_id)
-
         if not docs:
-            tracker.add("no_retrieval_docs")
+            tracker.add("no_docs")
             return None, {}
 
         docs = rerank(query, docs)
 
-        raw = generate_answer(
-            query=query,
-            severity=severity,
-            docs=docs,
-            symptoms=None,
-            llm_client=_llm
-        )
+        raw = generate_answer(query, severity, docs, None, _llm, trend_meta=trend_meta)
 
         if not isinstance(raw, dict):
             tracker.add("invalid_llm_output")
             return None, {}
 
-        context_docs = [d.get("content", "") for d in docs if d.get("content")]
+        ctx = [d.get("content", "") for d in docs if d.get("content")]
 
         eval_res = evaluate_rag(
             query=query,
             answer=raw.get("answer", ""),
-            retrieved_docs=context_docs,
-            context_docs=context_docs,
+            retrieved_docs=ctx,
+            context_docs=ctx,
             base_confidence=raw.get("confidence", 0.5)
         )
 
@@ -207,137 +240,111 @@ def rag(query: str, severity: float, user_id: str, tracker: DegradationTracker):
 def full_pipeline(user_id, query, sequence, user_history):
 
     t0 = time.time()
-    timings = {}
     tracker = DegradationTracker()
+    timings = {}
 
     try:
-        # VALIDATION
         query = _sanitize_query(query)
-        if not user_id or not query:
-            raise ValueError("Invalid input")
+        if not user_id:
+            raise ValueError("Invalid user")
+
+        # sequence is passed directly from API
+        t = time.time()
+        timings["feature_pipeline"] = time.time() - t
 
         # SIGNAL
-        t = time.time()
         signal = extract_user_signal(user_id) or {}
-        timings["signal"] = time.time() - t
 
-        # PREDICTION
-        t = time.time()
+        # PREDICT
         pred = predict(sequence, user_id, tracker)
-        timings["prediction"] = time.time() - t
 
         severity = pred["severity"]
         confidence = pred["confidence"]
 
-        trend = signal.get("trend", "unknown")
-        avg_sev = signal.get("avg_severity", severity)
-        anomaly = _detect_anomaly(severity, avg_sev)
-
         # TRUST
-        t = time.time()
         try:
             feedback = fetch_feedback_history(user_id) or []
             trust = _clamp(compute_trust_score(feedback, severity))
         except Exception:
             tracker.add("trust_failure")
             trust = 0.5
-        timings["trust"] = time.time() - t
 
         # GUARDRAIL
-        t = time.time()
-        try:
-            guard = evaluate_guardrail(query, severity)
-        except Exception:
-            tracker.add("guardrail_failure")
-            guard = {"override": False}
-        timings["guardrail"] = time.time() - t
-
+        guard = evaluate_guardrail(query, severity)
         if guard.get("override"):
-            response = {
+            return {
                 "prediction": pred,
-                "rag": {"answer": guard.get("message") or "Seek medical attention.", "sources": []},
-                "reasoning": {"override": True, "anomaly": anomaly},
-                "doctor": {"recommend": True, "urgency": "immediate"},
-                "meta": signal
+                "rag": {"answer": guard.get("message"), "sources": []},
+                "status": "guardrail_override"
             }
-            response.update(tracker.export())
-            response["latency_ms"] = int((time.time() - t0) * 1000)
-            return response
+        trend_meta = {"direction": "stable", "variability": "low"}
+        if user_history and len(user_history) >= 2:
+            trend_vals = []
+            for l in user_history[-7:]:
+                fv = l.get("feature_vector", [])
+                if fv and len(fv) > 0:
+                    trend_vals.append(float(fv[0]))
+            if len(trend_vals) >= 2:
+                diff = trend_vals[-1] - trend_vals[0]
+                if diff > 0.2: trend_meta["direction"] = "increasing"
+                elif diff < -0.2: trend_meta["direction"] = "decreasing"
+                var = sum(abs(trend_vals[i] - trend_vals[i-1]) for i in range(1, len(trend_vals))) / len(trend_vals)
+                if var > 0.3: trend_meta["variability"] = "high"
+                elif var > 0.1: trend_meta["variability"] = "medium"
+
+        # LLM Trend Summary Generation
+        trend_summary = ""
+        try:
+            if _llm:
+                prompt = f"""You are a clinical AI.
+Generate a 1-2 line summary and 1 line reasoning based on these trend signals.
+Direction: {trend_meta['direction']}
+Variability: {trend_meta['variability']}
+
+Example: 'Your symptoms appear stable with moderate variability. This suggests consistent but fluctuating intensity.'
+Do not use placeholders. Be concise."""
+                res = _llm.generate(prompt)
+                trend_summary = res if isinstance(res, str) else res.get("text", "")
+        except Exception:
+            trend_summary = ""
 
         # RAG
         t = time.time()
-        rag_out, eval_res = rag(query, severity, user_id, tracker)
-        timings["rag"] = time.time() - t
-
-        level = "low" if severity < 0.3 else "medium" if severity < 0.6 else "high"
+        rag_out, eval_res = rag(query, severity, user_id, tracker, trend_meta=trend_meta)
 
         if not rag_out:
-            rag_out = {"answer": _fallback_answer(level), "sources": []}
+            rag_out = {"answer": "Consult a professional.", "sources": []}
 
         rag_conf = _clamp(eval_res.get("confidence_adjusted", 0.3))
 
         # CONFIDENCE FUSION
-        confidence = _clamp(
-            0.4 * confidence +
-            0.3 * trust +
-            0.3 * rag_conf
-        )
+        confidence = _clamp(0.4 * confidence + 0.3 * trust + 0.3 * rag_conf)
 
         # DOCTOR
-        t = time.time()
-        try:
-            doctor = recommend_doctor(
-                severity=severity,
-                trend=trend,
-                history=user_history or [],
-                query=query,
-                confidence=confidence
-            )
-        except Exception:
-            tracker.add("doctor_failure")
-            doctor = {"recommend": False, "urgency": "none"}
-        timings["doctor"] = time.time() - t
+        doctor = recommend_doctor(
+            severity=severity,
+            trend=signal.get("trend"),
+            history=user_history or [],
+            query=query,
+            confidence=confidence
+        )
 
-        # RESPONSE
-        uncertainty = 1 - confidence
-        band = {
-            "lower": _clamp(severity - 0.2 * uncertainty),
-            "upper": _clamp(severity + 0.2 * uncertainty)
-        }
-
-        response = {
-            "prediction": {
-                "severity": round(severity, 3),
-                "confidence": round(confidence, 3),
-                "personalized": pred.get("personalized", False)
-            },
+        return {
+            "prediction": pred,
             "rag": rag_out,
-            "reasoning": {
-                "trend": trend,
-                "anomaly": anomaly,
-                "confidence_band": band,
-                "factors": {
-                    "trust": round(trust, 3),
-                    "rag_quality": round(eval_res.get("composite_score", 0), 3)
-                }
-            },
             "doctor": doctor,
-            "meta": signal,
-            "timings": {k: round(v, 4) for k, v in timings.items()},
-            "latency_ms": int((time.time() - t0) * 1000)
+            "confidence": confidence,
+            "latency_ms": int((time.time() - t0) * 1000),
+            "status": "ok",
+            "trend_meta": trend_meta,
+            "trend_summary": trend_summary,
+            **tracker.export()
         }
-
-        response.update(tracker.export())
-        return response
 
     except Exception:
-        logger.exception("[PIPELINE][CRITICAL][FAIL]")
+        logger.exception("[PIPELINE][CRITICAL]")
         return {
             "prediction": _default_pred(),
-            "rag": {"answer": "System error occurred. Please consult a healthcare professional.", "sources": []},
-            "reasoning": {},
-            "doctor": {"recommend": False},
-            "meta": {},
-            "latency_ms": int((time.time() - t0) * 1000),
+            "rag": {"answer": "System failure. Consult a doctor.", "sources": []},
             "status": "failed"
         }

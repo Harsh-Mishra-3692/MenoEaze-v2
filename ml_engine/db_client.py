@@ -43,7 +43,13 @@ def _safe_vec(v):
     if not isinstance(v, list) or len(v) != FEATURES:
         return None
     try:
-        return [float(x) for x in v]
+        vec = []
+        for x in v:
+            val = float(x)
+            if val != val: # NaN
+                val = 0.0
+            vec.append(val)
+        return vec
     except:
         return None
 

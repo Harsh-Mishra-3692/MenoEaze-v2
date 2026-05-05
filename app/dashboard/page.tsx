@@ -34,15 +34,17 @@ export default function DashboardPage() {
     const [stats, setStats] = useState({
         total: 0,
         avgSeverity: 0,
-        lastLogged: '',
+        lastLogged: '—',
         weekly: 0
     })
     const [history, setHistory] = useState<any[]>([])
+    const [statsKey, setStatsKey] = useState(0)
 
     useEffect(() => {
         supabase.auth.getUser().then(({ data }) => {
             if (data.user) {
                 setUserId(data.user.id)
+                fetchStats(data.user.id)
 
                 // Fetch username from local storage (NO DB LEAKS ALLOWED)
                 const storedName = localStorage.getItem('menoeaze_username')
@@ -52,9 +54,10 @@ export default function DashboardPage() {
                     // No username set — show prompt
                     setShowUsernameModal(true)
                 }
+            } else {
+                fetchStats("demo_user")
             }
         })
-        fetchStats()
     }, [])
 
     const saveUsername = async () => {
@@ -69,23 +72,54 @@ export default function DashboardPage() {
         setSavingUsername(false)
     }
 
-    async function fetchStats() {
+    async function fetchStats(uid?: string) {
+        const idToUse = uid || userId;
+        if (!idToUse) return;
+
         try {
-            const { getUserStats } = await import('@/lib/mlClient')
-            const data = await getUserStats()
+            const res = await fetch('/api/insight-summary', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: idToUse })
+            });
+            if (!res.ok) throw new Error("Failed to fetch stats");
+            const data = await res.json();
+            
             if (data) {
+                // Safe date parsing
+                let lastLoggedStr = '—';
+                if (data.last_logged && data.last_logged !== '—') {
+                    try {
+                        const d = new Date(data.last_logged);
+                        if (!isNaN(d.getTime())) {
+                            lastLoggedStr = d.toLocaleDateString();
+                        }
+                    } catch {
+                        lastLoggedStr = '—';
+                    }
+                }
+
                 setStats({
                     total: data.total_logs || 0,
-                    avgSeverity: data.avg_severity || 0,
-                    lastLogged: data.last_log_at ? new Date(data.last_log_at).toLocaleDateString() : '—',
-                    weekly: data.recent_count || 0
+                    avgSeverity: typeof data.avg_severity === 'number' 
+                        ? parseFloat(data.avg_severity.toFixed(1)) 
+                        : 0,
+                    lastLogged: lastLoggedStr,
+                    weekly: data.weekly_count || 0
                 })
-                setHistory(data.history || [])
+                setHistory(data.trend || [])
             }
         } catch (error) {
             console.error('Failed to fetch stats:', error)
             setStats({ total: 0, avgSeverity: 0, lastLogged: '—', weekly: 0 })
         }
+    }
+
+    const handleSymptomSuccess = () => {
+        // Refresh stats after new symptom log
+        const uid = userId || "demo_user"
+        fetchStats(uid)
+        setStatsKey(prev => prev + 1)
     }
 
     const greeting = () => {
@@ -219,7 +253,7 @@ export default function DashboardPage() {
                                     How are you feeling?
                                 </h2>
                             </div>
-                            <SymptomForm onSuccess={() => fetchStats()} />
+                            <SymptomForm onSuccess={handleSymptomSuccess} />
                         </div>
                     </motion.div>
 
@@ -248,7 +282,7 @@ export default function DashboardPage() {
                             )}
 
                             {userId ? (
-                                <AnalysisCard userId={userId} key={stats.lastLogged || Date.now()} />
+                                <AnalysisCard userId={userId} key={`analysis-${statsKey}`} />
                             ) : (
                                 <div className="text-gray-400 text-sm py-12 text-center">
                                     Loading your analytics…

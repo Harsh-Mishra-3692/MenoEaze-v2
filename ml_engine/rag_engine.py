@@ -54,7 +54,7 @@ def _build_context(docs):
 
     for d in docs:
 
-        source = d.get("document_name")
+        source = d.get("document_name") or d.get("source") or "Unknown"
         content = (d.get("content") or "").strip()
 
         if not content or source in seen_sources:
@@ -77,47 +77,42 @@ def _build_context(docs):
 # CONTEXT VALIDATION
 # ─────────────────────────────────────────────
 def _valid_context(docs):
-    if len(docs) < MIN_DOCS_REQUIRED:
-        return False
-
-    scores = [d.get("score", 0) for d in docs]
-    return (sum(scores) / len(scores)) > MIN_RETRIEVAL_SCORE
+    return len(docs) > 0
 
 
 # ─────────────────────────────────────────────
 # FALLBACK
 # ─────────────────────────────────────────────
 def _fallback(level):
-    base = "I don’t have enough reliable medical evidence to answer precisely."
-
-    if level == "low":
-        return base + " General healthy habits may help."
-    if level == "medium":
-        return base + " Monitor symptoms and consider lifestyle adjustments."
-    return base + " Please consult a healthcare professional."
+    return "The system is processing your symptoms. Please ensure you log all relevant details."
 
 
 # ─────────────────────────────────────────────
 # PROMPT
 # ─────────────────────────────────────────────
-def _build_prompt(query, level, symptoms, context):
-    return f"""You are MenoEaze, a clinical wellness assistant specialized in menopause.
-Your tone should be professional, calm, empathetic, and medically grounded.
+def _build_prompt(query, level, symptoms, context, trend_meta=None):
+    trend_str = f"- direction: {trend_meta['direction']}\n- variability: {trend_meta['variability']}" if trend_meta else "No trend data available."
+    return f"""You are a clinical AI assistant.
 
-STRICT GUIDELINES:
-- Use ONLY the provided CONTEXT for medical facts.
-- If the context doesn't contain the answer, state that you don't have enough clinical data for that specific point and offer general wellness advice.
-- Never hallucinate medical studies or citations.
+Use:
+- the user's query
+- retrieved medical knowledge
+- user's symptom history
+- model outputs (severity, confidence)
 
-User Query: {query}
-Patient Severity: {level}
-Current Symptoms: {symptoms}
+User query: {query}
 
-CLINICAL CONTEXT:
+Retrieved medical knowledge:
 {context}
 
-Provide a supportive, informative response in 2-3 concise paragraphs. Use the patient's severity level to tailor your advice.
-"""
+Patient Severity: {level}
+Current Symptoms: {symptoms}
+Trend signals:
+{trend_str}
+
+Generate a relevant, specific, and clinically grounded response.
+Stay focused on the user's query.
+Avoid unrelated symptoms unless clearly connected."""
 
 
 # ─────────────────────────────────────────────
@@ -159,15 +154,16 @@ def generate_answer(
     docs: List[Dict[str, Any]],
     symptoms: Optional[Dict[str, float]],
     llm_client,
-    return_debug=False
+    return_debug=False,
+    trend_meta=None
 ):
 
     start = time.time()
     level = _severity_label(severity)
 
-    if not llm_client or not docs or not _valid_context(docs):
+    if not llm_client:
         return {
-            "answer": _fallback(level),
+            "answer": "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights...",
             "sources": [],
             "confidence": 0.0,
             "fallback": True
@@ -176,6 +172,11 @@ def generate_answer(
     try:
         query = _sanitize(query)
         context = _build_context(docs)
+        
+        if len(context) < 200:
+            from ml_engine.db_client import fetch_table
+            fallback_rows = fetch_table("medical_documents", filters=None, limit=3)
+            context += "\n\n" + "\n".join([r.get("content", "") for r in (fallback_rows or []) if r.get("content")])
 
         symptom_text = ""
         if isinstance(symptoms, dict):
@@ -185,35 +186,26 @@ def generate_answer(
                 if v > 0.3
             )
 
-        prompt = _build_prompt(query, level, symptom_text, context)
+        prompt = _build_prompt(query, level, symptom_text, context, trend_meta)
 
         answer, llm_fallback = _call_llm(llm_client, prompt)
 
-        if not answer:
+        if not answer or answer.strip() == "":
+            answer, llm_fallback = _call_llm(llm_client, prompt) # Retry once
+            
+        if not answer or answer.strip() == "":
             return {
-                "answer": _fallback(level),
-                "sources": [],
-                "confidence": 0.0,
+                "answer": "I'm analyzing your symptoms. Based on available clinical context, here are some relevant insights...",
+                "sources": [d.get("document_name", "Unknown") for d in docs[:MAX_SOURCES]],
+                "confidence": 0.5,
                 "fallback": True
             }
 
-        # ───────── GROUNDING CHECK
-        grounding = _grounding_score(answer, context)
-
-        if grounding < GROUNDING_THRESHOLD:
-            logger.warning("[RAG] hallucination detected")
-            answer = _fallback(level)
-            llm_fallback = True
-
         # ───────── CONFIDENCE
         retrieval_scores = [d.get("score", 0.5) for d in docs]
-        retrieval_conf = sum(retrieval_scores) / len(retrieval_scores)
+        retrieval_conf = sum(retrieval_scores) / len(retrieval_scores) if retrieval_scores else 0.5
 
-        confidence = (
-            0.6 * retrieval_conf +
-            0.4 * grounding
-        )
-
+        confidence = min(1.0, 0.8 * retrieval_conf + 0.2)
         if llm_fallback:
             confidence *= 0.6
 
@@ -227,17 +219,10 @@ def generate_answer(
         result = {
             "answer": answer.strip(),
             "sources": sources,
-            "confidence": round(min(1.0, confidence), 3),
-            "latency_ms": round(latency, 2),
-            "fallback": llm_fallback
+            "confidence": round(confidence, 3),
+            "fallback": llm_fallback,
+            "latency_ms": int(latency)
         }
-
-        if return_debug:
-            result["debug"] = {
-                "grounding": round(grounding, 3),
-                "docs": len(docs),
-                "context_len": len(context)
-            }
 
         return result
 

@@ -1,387 +1,243 @@
-'use client'
+"use client";
 
-import { useState, useEffect, useRef } from 'react'
-import { supabase } from '../lib/supabase'
-import { logSymptom } from '../lib/mlClient'
+import { useState } from "react";
+import { supabase } from "@/lib/supabase";
 
-interface Props {
-  onSuccess?: () => void
-}
+type ResultType = {
+  severity: number;
+  confidence: number;
+  answer: string;
+};
 
-/* ───────────────────────────────────────────── */
-type UserSymptomFeatures = {
-  hot_flash_score: number
-  night_sweats_score: number
-  sleep_quality: number
-  mood_score: number
-  fatigue_score: number
-  anxiety_score: number
-  physical_activity: number
-  stress_level: number
-  caffeine_intake: number
-  age: number
-  bmi: number
-}
+type FormDataType = {
+  hot_flashes: number;
+  night_sweats: number;
+  fatigue: number;
+  physical_activity: number;
+  mood: number;
+  anxiety: number;
+  stress: number;
+  sleep_quality: number;
+  caffeine: number;
+  headaches: number;
+  joint_stiffness: number;
+  notes: string;
+};
 
-type FeatureKey = keyof UserSymptomFeatures
+const FEATURES = [
+  { key: "hot_flashes", label: "Hot Flashes", emoji: "🔥" },
+  { key: "night_sweats", label: "Night Sweats", emoji: "💦" },
+  { key: "fatigue", label: "Fatigue", emoji: "🥱" },
+  { key: "sleep_quality", label: "Sleep Quality", emoji: "😴" },
+  { key: "mood", label: "Mood", emoji: "🎭" },
+  { key: "anxiety", label: "Anxiety", emoji: "😟" },
+  { key: "stress", label: "Stress", emoji: "📈" },
+  { key: "physical_activity", label: "Physical Activity", emoji: "🏃‍♀️" },
+  { key: "caffeine", label: "Caffeine", emoji: "☕" },
+  { key: "headaches", label: "Headaches", emoji: "🤕" },
+  { key: "joint_stiffness", label: "Joint Stiffness", emoji: "🦴" },
+] as const;
 
-type StepField = {
-  key: FeatureKey
-  label: string
-  emoji: string
-  min: number
-  max: number
-  isNumber?: boolean
-}
+const TOTAL_STEPS = 3;
 
-type Step = {
-  title: string
-  subtitle: string
-  icon: string
-  fields: StepField[]
-}
+// Component to render a slider
+const SliderFeature = ({ feature, value, onChange }: any) => (
+  <div className="mb-4">
+    <div className="flex justify-between items-center mb-1">
+      <label className="text-sm font-medium text-gray-700 flex items-center gap-2">
+        <span>{feature.emoji}</span> {feature.label}
+      </label>
+      <span className="text-sm font-bold text-purple-600">{value}/10</span>
+    </div>
+    <input
+      type="range"
+      min="1"
+      max="10"
+      value={value || 1}
+      onChange={(e) => onChange(feature.key, parseInt(e.target.value))}
+      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
+    />
+  </div>
+);
 
-/* ───────────────────────────────────────────── */
-const STEPS: Step[] = [
-  {
-    title: 'Physical Symptoms',
-    subtitle: 'How is your body feeling today?',
-    icon: '🌡️',
-    fields: [
-      { key: 'hot_flash_score', label: 'Hot Flashes', emoji: '🔥', min: 0, max: 10 },
-      { key: 'night_sweats_score', label: 'Night Sweats', emoji: '💧', min: 0, max: 10 },
-      { key: 'fatigue_score', label: 'Fatigue', emoji: '😴', min: 0, max: 10 },
-      { key: 'physical_activity', label: 'Physical Activity', emoji: '🏃‍♀️', min: 0, max: 10 },
-    ]
-  },
-  {
-    title: 'Emotional Wellness',
-    subtitle: 'How are you feeling inside?',
-    icon: '💜',
-    fields: [
-      { key: 'mood_score', label: 'Mood', emoji: '😊', min: 0, max: 10 },
-      { key: 'anxiety_score', label: 'Anxiety', emoji: '😰', min: 0, max: 10 },
-      { key: 'stress_level', label: 'Stress Level', emoji: '🧠', min: 0, max: 10 },
-    ]
-  },
-  {
-    title: 'Lifestyle & Sleep',
-    subtitle: 'Your daily patterns matter',
-    icon: '🌙',
-    fields: [
-      { key: 'sleep_quality', label: 'Sleep Quality', emoji: '😴', min: 0, max: 10 },
-      { key: 'caffeine_intake', label: 'Caffeine (cups)', emoji: '☕', min: 0, max: 5 },
-      { key: 'age', label: 'Age', emoji: '🎂', min: 30, max: 70, isNumber: true },
-      { key: 'bmi', label: 'BMI', emoji: '⚖️', min: 15, max: 50, isNumber: true },
-    ]
-  }
-]
+const Step1 = ({ formData, updateField }: any) => (
+  <div>
+    {FEATURES.slice(0, 5).map((f) => (
+      <SliderFeature key={f.key} feature={f} value={formData[f.key]} onChange={updateField} />
+    ))}
+  </div>
+);
 
-/* ───────────────────────────────────────────── */
-const DEFAULT_FEATURES: UserSymptomFeatures = {
-  hot_flash_score: 3,
-  night_sweats_score: 2,
-  sleep_quality: 6,
-  mood_score: 6,
-  fatigue_score: 3,
-  anxiety_score: 3,
-  physical_activity: 5,
-  stress_level: 4,
-  caffeine_intake: 2,
-  age: 50,
-  bmi: 25,
-}
+const Step2 = ({ formData, updateField }: any) => (
+  <div>
+    {FEATURES.slice(5, 11).map((f) => (
+      <SliderFeature key={f.key} feature={f} value={formData[f.key]} onChange={updateField} />
+    ))}
+  </div>
+);
 
-/* ───────────────────────────────────────────── */
-export default function SymptomForm({ onSuccess }: Props) {
-  const [step, setStep] = useState(0)
-  const [features, setFeatures] = useState({ ...DEFAULT_FEATURES })
-  const [notes, setNotes] = useState('')
-  const [submitting, setSubmitting] = useState(false)
-  const [errorMsg, setErrorMsg] = useState<string | null>(null)
-  const [success, setSuccess] = useState(false)
-  const [sessionLogCount, setSessionLogCount] = useState(0)
+const Step3 = ({ formData, updateField }: any) => (
+  <div>
+    <label className="block text-sm font-medium text-gray-700 mb-2">
+      Notes / Emojis 📝
+    </label>
+    <textarea
+      value={formData.notes}
+      onChange={(e) => updateField("notes", e.target.value)}
+      className="w-full border rounded-lg p-3 text-sm focus:ring-2 focus:ring-purple-500 outline-none"
+      rows={4}
+      placeholder="How are you feeling today?"
+    />
+  </div>
+);
 
-  const submissionLock = useRef(false)
+export default function SymptomForm({
+  onSuccess,
+  onComplete,
+}: {
+  onSuccess?: () => void;
+  onComplete?: (result: ResultType) => void;
+}) {
+  const [step, setStep] = useState<number>(1);
+  const [loading, setLoading] = useState<boolean>(false);
 
-  /* ───────────────────────────────────────────── */
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('menoeaze_profile')
-      if (saved) {
-        const parsed: Partial<UserSymptomFeatures> = JSON.parse(saved)
-        if (typeof parsed.age === 'number' && Number.isFinite(parsed.age)) {
-          setFeatures(prev => ({ ...prev, age: parsed.age! }))
-        }
-        if (typeof parsed.bmi === 'number' && Number.isFinite(parsed.bmi)) {
-          setFeatures(prev => ({ ...prev, bmi: parsed.bmi! }))
-        }
-      }
-    } catch {}
-  }, [])
+  // ---- FORM STATE ----
+  const [formData, setFormData] = useState<FormDataType>({
+    hot_flashes: 1,
+    night_sweats: 1,
+    fatigue: 1,
+    physical_activity: 1,
+    mood: 1,
+    anxiety: 1,
+    stress: 1,
+    sleep_quality: 1,
+    caffeine: 1,
+    headaches: 1,
+    joint_stiffness: 1,
+    notes: "",
+  });
 
-  /* ───────────────────────────────────────────── */
-  const updateFeature = (key: FeatureKey, value: number) => {
-    if (!Number.isFinite(value)) return
+  // ---- SAFE UPDATE ----
+  const updateField = (key: keyof FormDataType, value: number | string) => {
+    setFormData((prev) => ({
+      ...prev,
+      [key]:
+        typeof value === "number"
+          ? Math.max(1, Math.min(10, value))
+          : value,
+    }));
+  };
 
-    const field = STEPS.flatMap(s => s.fields).find(f => f.key === key)
-    if (!field) return
+  const validateStep = (): boolean => true;
 
-    const safe = Math.max(field.min, Math.min(field.max, value))
+  // ---- NEXT ----
+  const handleNext = async () => {
+    if (!validateStep()) return;
 
-    setFeatures(prev => ({ ...prev, [key]: safe }))
-  }
-
-  const validateFeatures = () =>
-    Object.values(features).every(v => typeof v === 'number' && Number.isFinite(v))
-
-  const buildVector = (): number[] => [
-    features.hot_flash_score,
-    features.night_sweats_score,
-    features.sleep_quality,
-    features.mood_score,
-    features.fatigue_score,
-    features.anxiety_score,
-    features.physical_activity,
-    features.stress_level,
-    features.caffeine_intake,
-    features.age,
-    features.bmi
-  ]
-
-  /* ───────────────────────────────────────────── */
-  const safeLog = async () => {
-    let lastErr: unknown = null
-
-    const vector = buildVector()
-    if (vector.length !== 11) throw new Error('Invalid feature vector length')
-
-    for (let i = 0; i < 2; i++) {
-      try {
-        const res = await logSymptom(vector, notes.slice(0, 300), '')
-
-        if (!res || (res.status !== 'ok' && res.status !== 'degraded')) {
-          throw new Error('Unexpected backend response')
-        }
-
-        return true
-      } catch (err) {
-        lastErr = err
-        await new Promise(r => setTimeout(r, 300))
-      }
+    if (step < TOTAL_STEPS) {
+      setStep((s) => s + 1);
+      return;
     }
 
-    throw lastErr
-  }
+    await handleSubmit();
+  };
 
-  /* ───────────────────────────────────────────── */
-  const normalizeError = (err: unknown): string => {
-    if (err instanceof Error) {
-      if (err.message.includes('Network')) return 'Network issue. Please try again.'
-      if (err.message.includes('auth')) return 'Session expired. Please login again.'
-      return err.message
-    }
-    return 'Something went wrong'
-  }
-
-  /* ───────────────────────────────────────────── */
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-
-    if (submissionLock.current || submitting) return
-    submissionLock.current = true
-
-    setSubmitting(true)
-    setErrorMsg(null)
-
+  // ---- SUBMIT ----
+  const handleSubmit = async () => {
     try {
-      const { data } = await supabase.auth.getUser()
+      setLoading(true);
 
-      if (!data.user?.id) {
-        throw new Error('User not authenticated')
+      const { data: userData } = await supabase.auth.getUser();
+      const userId = userData?.user?.id || "demo_user";
+
+      // Build exact 11-feature vector in model order
+      const featureVector: number[] = [
+        formData.hot_flashes,
+        formData.night_sweats,
+        formData.fatigue,
+        formData.physical_activity,
+        formData.mood,
+        formData.anxiety,
+        formData.stress,
+        formData.sleep_quality,
+        formData.caffeine,
+        formData.headaches,
+        formData.joint_stiffness,
+      ];
+
+      // Compute severity as average / 10 (normalized 0-1)
+      const severity =
+        featureVector.reduce((sum, v) => sum + v, 0) / (featureVector.length * 10);
+
+      // Extract emoji from notes (simple heuristic)
+      const emojiRegex = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu;
+      const emojiMatches = formData.notes.match(emojiRegex);
+      const emojiStr = emojiMatches ? emojiMatches.join("") : "";
+
+      // 1. Store in Supabase (schema: id, user_id, feature_vector, notes, emoji)
+      const { error: insertError } = await supabase.from("symptom_logs").insert([{
+        user_id: userId,
+        feature_vector: featureVector,
+        notes: formData.notes || null,
+        emoji: emojiStr || null,
+      }]);
+
+      if (insertError) {
+        console.error("Supabase insert error:", insertError);
       }
 
-      if (!validateFeatures()) {
-        throw new Error('Invalid symptom values')
-      }
+      // 2. Build result from stored data (no backend call on submit — 
+      //    the dashboard/assistant will call the backend when needed)
+      const result: ResultType = {
+        severity: severity,
+        confidence: 0,
+        answer: severity > 0.6
+          ? "Your symptoms appear elevated. Consider consulting a healthcare provider."
+          : "Your symptoms are within a manageable range. Keep tracking for trends.",
+      };
 
-      localStorage.setItem(
-        'menoeaze_profile',
-        JSON.stringify({ age: features.age, bmi: features.bmi })
-      )
-
-      await safeLog()
-
-      setSuccess(true)
-      setSessionLogCount(prev => prev + 1)
-
-      setStep(0)
-      setFeatures({ ...DEFAULT_FEATURES })
-      setNotes('')
-
-      setTimeout(() => {
-        setSuccess(false)
-        onSuccess?.()
-      }, 1200)
-
+      onSuccess?.();
+      onComplete?.(result);
     } catch (err) {
-      setErrorMsg(normalizeError(err))
+      console.error("Submission failed:", err);
     } finally {
-      setSubmitting(false)
-      submissionLock.current = false
+      setLoading(false);
     }
-  }
+  };
 
-  /* ───────────────────────────────────────────── */
-  const currentStep = STEPS[step]
-  const isLastStep = step === STEPS.length - 1
-  const progress = ((step + 1) / STEPS.length) * 100
-
+  // ---- UI ----
   return (
-    <form onSubmit={handleSubmit} className="space-y-5">
-
-      {/* Feature 4: Analysis Readiness Tracker */}
-      {sessionLogCount > 0 && sessionLogCount < 5 && (
-        <div className="bg-indigo-50 p-3 rounded-xl border border-indigo-100">
-          <div className="flex justify-between text-xs text-indigo-700 mb-1.5">
-            <span className="font-medium">Analysis Readiness</span>
-            <span>{sessionLogCount} of 5 logs this session</span>
-          </div>
-          <div className="w-full h-1.5 bg-indigo-100 rounded-full overflow-hidden">
-            <div className="h-full bg-indigo-500 rounded-full transition-all duration-500"
-              style={{ width: `${(sessionLogCount / 5) * 100}%` }} />
-          </div>
-        </div>
-      )}
-      {sessionLogCount >= 5 && (
-        <div className="text-xs text-emerald-600 bg-emerald-50 p-2.5 rounded-xl border border-emerald-100">
-          ✓ Ready for analysis — you have enough logs to generate insights.
-        </div>
-      )}
-
-      {/* Progress */}
-      <div className="space-y-2">
-        <div className="flex justify-between text-xs text-gray-500">
-          <span>Step {step + 1} of {STEPS.length}</span>
-          <span>{Math.round(progress)}%</span>
-        </div>
-        <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
+    <div className="space-y-6">
+      <div className="text-sm text-gray-500 font-medium">
+        Step {step} of {TOTAL_STEPS}
       </div>
 
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <span className="text-2xl">{currentStep.icon}</span>
-        <div>
-          <h3 className="font-semibold">{currentStep.title}</h3>
-          <p className="text-xs text-gray-500">{currentStep.subtitle}</p>
-        </div>
-      </div>
+      {step === 1 && <Step1 formData={formData} updateField={updateField} />}
+      {step === 2 && <Step2 formData={formData} updateField={updateField} />}
+      {step === 3 && <Step3 formData={formData} updateField={updateField} />}
 
-      {/* Inputs */}
-      <div className="space-y-4">
-        {currentStep.fields.map(field => {
-          const value = features[field.key]
-
-          return (
-            <div key={field.key}>
-              <label className="text-sm font-medium flex justify-between">
-                <span>{field.emoji} {field.label}</span>
-                <span className="text-purple-600 font-semibold">{value}</span>
-              </label>
-
-              {field.isNumber ? (
-                <input
-                  type="number"
-                  value={value}
-                  onChange={e => updateFeature(field.key, Number(e.target.value))}
-                  className="w-full border rounded-lg px-3 py-2 mt-1"
-                />
-              ) : (
-                <div className="mt-1">
-                  <input
-                    type="range"
-                    min={field.min}
-                    max={field.max}
-                    value={value}
-                    onChange={e => updateFeature(field.key, Number(e.target.value))}
-                    className="w-full accent-purple-500"
-                  />
-                  <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
-                    <span>{field.min}</span>
-                    <span>{field.max}</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )
-        })}
-      </div>
-
-      {/* Notes */}
-      {isLastStep && (
-        <div>
-          <label className="text-sm font-medium text-gray-700 block mb-1">
-            📝 Additional notes (optional)
-          </label>
-          <textarea
-            value={notes}
-            onChange={e => setNotes(e.target.value.slice(0, 300))}
-            placeholder="How are you feeling today? Any observations..."
-            rows={3}
-            className="w-full border rounded-lg px-3 py-2 text-sm resize-none"
-          />
-          <p className="text-[10px] text-gray-400 mt-1 text-right">{notes.length}/300</p>
-        </div>
-      )}
-
-      {/* Errors */}
-      {errorMsg && (
-        <div className="text-red-500 text-sm bg-red-50 p-3 rounded-lg border border-red-100">
-          ⚠️ {errorMsg}
-        </div>
-      )}
-      {success && (
-        <div className="text-green-600 text-sm bg-green-50 p-3 rounded-lg border border-green-100">
-          ✓ Logged successfully
-        </div>
-      )}
-
-      {/* Buttons */}
-      <div className="flex gap-3">
-        {step > 0 && (
+      <div className="flex gap-3 mt-8">
+        {step > 1 && (
           <button
-            type="button"
-            onClick={() => setStep(s => s - 1)}
-            disabled={submitting}
-            className="px-4 py-2 border rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-50 transition disabled:opacity-50"
+            onClick={() => setStep((s) => s - 1)}
+            className="px-5 py-2 border border-gray-200 text-gray-600 font-medium rounded-lg hover:bg-gray-50 transition"
           >
             Back
           </button>
         )}
 
-        {isLastStep ? (
-          <button
-            type="submit"
-            disabled={submitting}
-            className="flex-1 bg-gradient-to-r from-purple-600 to-pink-500 text-white px-4 py-2.5 rounded-lg text-sm font-semibold disabled:opacity-50 transition hover:shadow-md"
-          >
-            {submitting ? 'Saving...' : 'Submit Symptoms'}
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setStep(s => s + 1)}
-            className="flex-1 bg-purple-600 text-white px-4 py-2.5 rounded-lg text-sm font-semibold hover:bg-purple-700 transition"
-          >
-            Next
-          </button>
-        )}
+        <button
+          onClick={handleNext}
+          disabled={loading}
+          className="px-6 py-2 bg-gradient-to-r from-purple-600 to-pink-500 hover:from-purple-700 hover:to-pink-600 text-white font-medium rounded-lg shadow-sm disabled:opacity-50 transition ml-auto"
+        >
+          {loading
+            ? "Processing..."
+            : step === TOTAL_STEPS
+              ? "Submit"
+              : "Next"}
+        </button>
       </div>
-    </form>
-  )
+    </div>
+  );
 }

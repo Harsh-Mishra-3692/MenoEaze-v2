@@ -5,7 +5,7 @@ import json
 import logging
 from datetime import datetime, UTC
 
-from feature_schema import FeatureSchema
+from ml_engine.feature_schema import FeatureSchema
 
 
 # =========================================================
@@ -259,6 +259,32 @@ def main():
     logger.info(f"Sequences: {len(metadata)}")
     logger.info(f"Fallback users: {audit['fallback_users']}")
     logger.info(f"Synthetic ratio: {audit['synthetic_ratio']:.2f}")
+
+
+
+# =========================================================
+# 🔥 PRODUCTION WRAPPER (REQUIRED BY PIPELINE)
+# =========================================================
+def build_sequence_for_inference(features: list) -> np.ndarray:
+    """
+    Thin wrapper to convert feature list to (5, 11) sequence.
+    LOCKED to production feature count (11).
+    """
+    if not isinstance(features, (list, np.ndarray)):
+        return None
+        
+    # Standardize to 11 features
+    vec = np.array(features, dtype=np.float32).flatten()
+    if vec.shape[0] != 11:
+        # Pad or truncate to 11
+        tmp = np.zeros(11, dtype=np.float32)
+        n = min(len(vec), 11)
+        tmp[:n] = vec[:n]
+        vec = tmp
+        
+    # Create dummy sequence of length 5
+    seq = np.tile(vec, (5, 1))
+    return seq
 
 
 if __name__ == "__main__":

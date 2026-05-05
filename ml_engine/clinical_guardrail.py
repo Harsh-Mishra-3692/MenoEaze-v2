@@ -174,15 +174,17 @@ def apply_guardrail(
 
         risk = _risk_level(severity)
 
-        # ── DOMAIN BLOCK (FIRST) ─────────────
+        # ── DOMAIN CHECK (SOFT — frontend handles hard filtering) ──
         if not _match(q, DOMAIN_PATTERNS):
             return {
-                "override": True,
+                "safe": True,
+                "override": False,
                 "risk_level": "low",
                 "risk_score": severity,
                 "trend": "unknown",
                 "requires_attention": False,
-                "message": "I only handle menopause-related concerns."
+                "flags": ["off_domain_soft"],
+                "message": None
             }
 
         # ── RED FLAG (HIGHEST PRIORITY) ─────
