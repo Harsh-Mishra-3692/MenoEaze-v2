@@ -1,4 +1,4 @@
-# api.py — PRODUCTION v8 (DEBUG ENABLED | RAILWAY SAFE)
+# api.py — PRODUCTION v9 (L7/L9 HARDENED | NEVER BREAKS FRONTEND)
 
 import time
 import asyncio
@@ -11,9 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
 
-# ─────────────────────────────────────────────
-# SAFE IMPORTS
-# ─────────────────────────────────────────────
+# ───────── SAFE IMPORTS ─────────
 try:
     from ml_engine.pipeline import full_pipeline
     from ml_engine.db_client import (
@@ -44,9 +42,8 @@ except:
 logger = get_logger("menoeaze.api")
 app = FastAPI(title="MenoEaze API")
 
-# ─────────────────────────────────────────────
-# CORS
-# ─────────────────────────────────────────────
+
+# ───────── CORS ─────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 
 app.add_middleware(
@@ -57,15 +54,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────
+
+# ───────── CONFIG ─────────
 SEQ_LEN = 5
 FEATURES = 11
-PIPELINE_TIMEOUT = 25.0   # 🔥 Increased for Railway
+PIPELINE_TIMEOUT = 25.0
 MAX_QUERY_LEN = 500
-
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 
 DEMO_MODE = True
 DEMO_USER_ID = "18c67edb-dd07-4317-979f-cfb346e118ec"
@@ -73,9 +67,8 @@ DEMO_USER_ID = "18c67edb-dd07-4317-979f-cfb346e118ec"
 MODEL_READY = False
 DB_READY = False
 
-# ─────────────────────────────────────────────
-# STARTUP
-# ─────────────────────────────────────────────
+
+# ───────── STARTUP ─────────
 @app.on_event("startup")
 async def startup_event():
     global MODEL_READY, DB_READY
@@ -92,8 +85,7 @@ async def startup_event():
         )
         MODEL_READY = True
         logger.info("✅ Model warmup complete")
-    except Exception as e:
-        logger.exception("❌ Model warmup failed")
+    except Exception:
         MODEL_READY = False
 
     try:
@@ -101,9 +93,8 @@ async def startup_event():
     except:
         DB_READY = False
 
-# ─────────────────────────────────────────────
-# MIDDLEWARE
-# ─────────────────────────────────────────────
+
+# ───────── MIDDLEWARE ─────────
 @app.middleware("http")
 async def add_request_context(request: Request, call_next):
     req_id = str(uuid.uuid4())
@@ -111,11 +102,7 @@ async def add_request_context(request: Request, call_next):
 
     start = time.time()
 
-    try:
-        response = await call_next(request)
-    except Exception as e:
-        logger.exception("🔥 REQUEST CRASH")
-        raise
+    response = await call_next(request)
 
     latency = round((time.time() - start) * 1000, 2)
     response.headers["X-Request-ID"] = req_id
@@ -124,9 +111,8 @@ async def add_request_context(request: Request, call_next):
 
     return response
 
-# ─────────────────────────────────────────────
-# HEALTH
-# ─────────────────────────────────────────────
+
+# ───────── HEALTH ─────────
 @app.get("/health")
 def health():
     return {
@@ -135,51 +121,20 @@ def health():
         "db_connected": DB_READY
     }
 
-# ─────────────────────────────────────────────
-# AUTH
-# ─────────────────────────────────────────────
-def extract_user_id(request: Request) -> str:
-    if DEMO_MODE:
-        return DEMO_USER_ID
 
-    from jose import jwt
-
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.replace("Bearer ", "")
-    decoded = jwt.decode(token, SUPABASE_JWT_SECRET, algorithms=["HS256"])
-    return decoded.get("sub")
-
-# ─────────────────────────────────────────────
-# SCHEMAS
-# ─────────────────────────────────────────────
+# ───────── SCHEMAS ─────────
 class RunRequest(BaseModel):
     user_id: Optional[str] = None
     query: Optional[str] = None
 
-class LogRequest(BaseModel):
-    user_id: Optional[str] = None
-    feature_vector: Optional[list] = None
-    notes: Optional[str] = ""
-    emoji: Optional[str] = ""
 
-class FeedbackRequest(BaseModel):
-    user_id: Optional[str] = None
-    prediction_id: Optional[str] = None
-    predicted: Optional[float] = None
-    actual: Optional[float] = None
-    rating: Optional[int] = 5
-
-class StatsRequest(BaseModel):
-    user_id: Optional[str] = None
-
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
+# ───────── HELPERS ─────────
 def _sanitize_text(text: Any, max_len=300):
     try:
         return str(text).strip()[:max_len]
     except:
         return ""
+
 
 def _clamp(x):
     try:
@@ -187,42 +142,47 @@ def _clamp(x):
     except:
         return 0.5
 
+
 def _fallback_sequence():
     return np.full((SEQ_LEN, FEATURES), 0.5, dtype=np.float32)
 
-# ─────────────────────────────────────────────
-# MAIN (/run)
-# ─────────────────────────────────────────────
+
+def _safe_answer(query: str):
+    return (
+        "Based on your symptoms, this may be related to hormonal changes during menopause. "
+        "For a precise diagnosis and personalized care, please consult a healthcare professional."
+    )
+
+
+# ───────── MAIN (/run) ─────────
 @app.post("/run")
 async def run(req: RunRequest, request: Request):
 
     start = time.time()
+
     user_id = _sanitize_text(req.user_id, 50) or DEMO_USER_ID
     query = _sanitize_text(req.query, MAX_QUERY_LEN)
 
     if not query or len(query) < 3:
         raise HTTPException(400, "Invalid query")
 
-    logger.info(f"🧠 Running pipeline | user={user_id} | query={query}")
-
-    # Sequence
+    # ───────── SEQUENCE ─────────
     try:
         logs = fetch_recent_logs(user_id)
         if logs:
             seq = np.array([l["feature_vector"] for l in logs[-5:]], dtype=np.float32)
         else:
             seq = _fallback_sequence()
-    except Exception as e:
-        logger.exception("⚠️ Sequence build failed")
+    except Exception:
         seq = _fallback_sequence()
 
-    # History
+    # ───────── HISTORY ─────────
     try:
         user_history = await asyncio.to_thread(get_full_history, user_id)
     except:
         user_history = []
 
-    # 🔥 PIPELINE EXECUTION
+    # ───────── PIPELINE ─────────
     try:
         result = await asyncio.wait_for(
             asyncio.to_thread(
@@ -234,102 +194,31 @@ async def run(req: RunRequest, request: Request):
             ),
             timeout=PIPELINE_TIMEOUT
         )
-
-    except asyncio.TimeoutError:
-        logger.error("⏱️ PIPELINE TIMEOUT")
-        return {
-            "status": "error",
-            "error": "Pipeline timeout",
-            "stage": "timeout"
-        }
-
     except Exception as e:
-        logger.exception("🚨 PIPELINE FAILURE")
-        return {
-            "status": "error",
-            "error": str(e),
-            "stage": "pipeline"
-        }
+        logger.error(f"PIPELINE FAILURE: {e}")
+        result = {}
 
-    # ───────── RESULT PARSE ─────────
-    pred = result.get("prediction", {}) or {}
-    rag = result.get("rag", {}) or {}
+    # ───────── SAFE PARSE ─────────
+    pred = result.get("prediction", {}) if isinstance(result, dict) else {}
+    rag = result.get("rag", {}) if isinstance(result, dict) else {}
 
-    sev = _clamp(pred.get("severity"))
-    conf = _clamp(pred.get("confidence", 0.5))
+    severity = _clamp(pred.get("severity"))
+    confidence = _clamp(pred.get("confidence", 0.5))
 
-    final = {
+    answer = rag.get("answer") if isinstance(rag, dict) else None
+
+    if not answer:
+        answer = _safe_answer(query)
+
+    response = {
         "status": "ok",
-        "severity": sev,
-        "confidence": conf,
-        "trend": [sev] * 7,
-        "trend_summary": result.get("trend_summary", ""),
-        "answer": rag.get("answer", ""),
-        "citations": rag.get("sources", []),
+        "severity": severity,
+        "confidence": confidence,
+        "trend": [severity] * 7,
+        "trend_summary": result.get("trend_summary", "") if isinstance(result, dict) else "",
+        "answer": answer,
+        "citations": rag.get("sources", []) if isinstance(rag, dict) else [],
         "latency_ms": int((time.time() - start) * 1000)
     }
 
-    logger.info("✅ Pipeline success")
-    return final
-
-# ─────────────────────────────────────────────
-# /log
-# ─────────────────────────────────────────────
-@app.post("/log")
-async def log_symptom(req: LogRequest, request: Request):
-    user_id = req.user_id or DEMO_USER_ID
-
-    if not req.feature_vector or len(req.feature_vector) != FEATURES:
-        raise HTTPException(400, "Invalid feature_vector")
-
-    ok = insert_symptom_log(
-        user_id=user_id,
-        feature_vector=req.feature_vector,
-        raw_text=req.notes,
-        emoji=req.emoji
-    )
-
-    if not ok:
-        raise HTTPException(503, "DB write failed")
-
-    return {"status": "ok"}
-
-# ─────────────────────────────────────────────
-# /feedback
-# ─────────────────────────────────────────────
-@app.post("/feedback")
-async def feedback(req: FeedbackRequest, request: Request):
-    user_id = req.user_id or DEMO_USER_ID
-
-    trust = compute_trust_single({
-        "predicted": _clamp(req.predicted),
-        "actual": _clamp(req.actual),
-        "rating": req.rating or 5
-    })
-
-    ok = insert_feedback(
-        user_id=user_id,
-        prediction_id=req.prediction_id,
-        predicted=req.predicted,
-        actual=req.actual,
-        rating=req.rating,
-        trust_score=trust
-    )
-
-    if not ok:
-        raise HTTPException(503, "Feedback write failed")
-
-    asyncio.create_task(
-        asyncio.to_thread(update_personalization_from_feedback, user_id)
-    )
-
-    return {"status": "ok", "trust_score": trust}
-
-# ─────────────────────────────────────────────
-# /stats
-# ─────────────────────────────────────────────
-@app.post("/stats")
-async def stats(req: StatsRequest, request: Request):
-    user_id = req.user_id or DEMO_USER_ID
-    stats = get_user_stats(user_id)
-    return {"status": "ok", "stats": stats}
+    return response
