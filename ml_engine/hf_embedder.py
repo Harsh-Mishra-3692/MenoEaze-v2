@@ -1,4 +1,4 @@
-# hf_embedder.py — FINAL HARDENED (PRODUCTION + FAULT-TOLERANT)
+# hf_embedder.py — PRODUCTION v7 (L7/L9 HARDENED | RAILWAY SAFE)
 
 import logging
 import numpy as np
@@ -7,20 +7,22 @@ import threading
 import time
 import hashlib
 from typing import List, Union
-from sentence_transformers import SentenceTransformer
+
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None
 
 logger = logging.getLogger("menoeaze.embedder")
 
 
 class HFEmbedder:
     """
-    Production-grade embedding system:
-    - Thread-safe lazy loading
-    - GPU fallback → CPU
-    - Deterministic outputs
-    - Input alignment guaranteed
-    - Safe failure fallback (no crashes)
-    - Lightweight caching
+    L7/L9 Production Embedder:
+    - Non-blocking lazy load
+    - Strict timeout control
+    - Instant fallback mode (Railway safe)
+    - Cache + deterministic output
     """
 
     MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -29,78 +31,84 @@ class HFEmbedder:
     MAX_TEXT_LEN = 2000
     CACHE_SIZE = 512
 
+    LOAD_TIMEOUT = 6  # 🔴 critical for Railway
+
     def __init__(self):
         self._model = None
+        self._loading = False
         self._lock = threading.Lock()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._cache = {}
 
     # ─────────────────────────────────────────────
-    # SAFE MODEL LOAD (THREAD SAFE + FALLBACK)
+    # SAFE MODEL LOAD (NON-BLOCKING)
     # ─────────────────────────────────────────────
-    def _load_model(self):
-        if self._model is not None:
-            return
+    def _load_model_async(self):
 
-        with self._lock:
-            if self._model is not None:
-                return
-
+        def _load():
             try:
                 logger.info(f"[Embedder] Loading model on {self.device}")
-                self._model = SentenceTransformer(self.MODEL_NAME, device=self.device)
 
-                # warmup
-                self._model.encode(
-                    ["warmup"],
-                    convert_to_numpy=True,
-                    show_progress_bar=False,
-                )
+                model = SentenceTransformer(self.MODEL_NAME, device=self.device)
 
+                model.encode(["warmup"], convert_to_numpy=True)
+
+                self._model = model
                 logger.info("[Embedder] Model ready")
 
             except Exception as e:
-                logger.error(f"[Embedder] GPU load failed, retry CPU: {e}")
+                logger.error(f"[Embedder] Load failed: {e}")
+                self._model = None
 
-                try:
-                    self.device = "cpu"
-                    self._model = SentenceTransformer(self.MODEL_NAME, device="cpu")
+            finally:
+                self._loading = False
 
-                    self._model.encode(["warmup"], convert_to_numpy=True)
-                    logger.info("[Embedder] CPU fallback ready")
+        if self._loading:
+            return
 
-                except Exception as e2:
-                    logger.critical(f"[Embedder] Model load failed: {e2}")
-                    self._model = None
+        self._loading = True
+        thread = threading.Thread(target=_load, daemon=True)
+        thread.start()
+
+    def _ensure_model(self):
+        if self._model is not None:
+            return True
+
+        if SentenceTransformer is None:
+            logger.warning("[Embedder] SentenceTransformer not available")
+            return False
+
+        # start async load
+        self._load_model_async()
+
+        # wait limited time only
+        start = time.time()
+        while self._loading and (time.time() - start < self.LOAD_TIMEOUT):
+            time.sleep(0.1)
+
+        return self._model is not None
 
     # ─────────────────────────────────────────────
-    # HASH (CACHE KEY)
+    # HASH
     # ─────────────────────────────────────────────
     def _hash(self, text: str) -> str:
         return hashlib.md5(text.encode()).hexdigest()
 
     # ─────────────────────────────────────────────
-    # SANITIZE (NO DROP, ALIGN SAFE)
+    # SANITIZE
     # ─────────────────────────────────────────────
     def _sanitize(self, texts: List[str]) -> List[str]:
-        clean = []
-
+        out = []
         for t in texts:
             if not isinstance(t, str):
-                clean.append("")
+                out.append("")
                 continue
-
             t = t.strip()
-            if not t:
-                clean.append("")
-                continue
-
-            clean.append(t[:self.MAX_TEXT_LEN])
-
-        return clean
+            out.append(t[:self.MAX_TEXT_LEN] if t else "")
+        return out
 
     # ─────────────────────────────────────────────
-    # SAFE ZERO VECTOR (FALLBACK)
+    # ZERO VECTOR
     # ─────────────────────────────────────────────
     def _zero_vector(self):
         return np.zeros(self.EXPECTED_DIM, dtype=np.float32)
@@ -110,24 +118,15 @@ class HFEmbedder:
     # ─────────────────────────────────────────────
     def embed(self, texts: Union[str, List[str]]) -> np.ndarray:
 
-        if texts is None:
-            raise ValueError("Input is None")
-
         if isinstance(texts, str):
             texts = [texts]
 
-        if not isinstance(texts, list) or not texts:
-            raise ValueError("Invalid input")
-
-        self._load_model()
-
-        if self._model is None:
-            logger.error("[Embedder] Model unavailable — fallback to zeros")
-            return np.vstack([self._zero_vector() for _ in texts])
+        if not texts:
+            return np.zeros((1, self.EXPECTED_DIM), dtype=np.float32)
 
         texts = self._sanitize(texts)
 
-        # ── CACHE LOOKUP ───────────────────────
+        # ───────── CACHE FIRST ─────────
         embeddings = []
         uncached = []
         uncached_idx = []
@@ -142,65 +141,49 @@ class HFEmbedder:
                 uncached.append(t)
                 uncached_idx.append(i)
 
-        # ── COMPUTE UNCACHED ───────────────────
-        if uncached:
+        # ───────── TRY MODEL ─────────
+        model_ready = self._ensure_model()
+
+        if model_ready and uncached:
             try:
                 with torch.inference_mode():
+                    vecs = self._model.encode(
+                        uncached,
+                        batch_size=min(len(uncached), self.MAX_BATCH_SIZE),
+                        normalize_embeddings=True,
+                        convert_to_numpy=True,
+                        show_progress_bar=False,
+                    ).astype(np.float32)
 
-                    for i in range(0, len(uncached), self.MAX_BATCH_SIZE):
-                        batch = uncached[i:i + self.MAX_BATCH_SIZE]
+                for i, v in enumerate(vecs):
+                    idx = uncached_idx[i]
 
-                        vecs = self._model.encode(
-                            batch,
-                            batch_size=len(batch),
-                            normalize_embeddings=True,
-                            convert_to_numpy=True,
-                            show_progress_bar=False,
-                        )
+                    if (
+                        v.ndim != 1
+                        or v.shape[0] != self.EXPECTED_DIM
+                        or not np.isfinite(v).all()
+                    ):
+                        v = self._zero_vector()
 
-                        vecs = vecs.astype(np.float32)
+                    embeddings[idx] = v
 
-                        for j, v in enumerate(vecs):
-                            if (
-                                v.ndim != 1
-                                or v.shape[0] != self.EXPECTED_DIM
-                                or not np.isfinite(v).all()
-                            ):
-                                v = self._zero_vector()
+                    if len(self._cache) >= self.CACHE_SIZE:
+                        self._cache.pop(next(iter(self._cache)))
 
-                            idx = uncached_idx[i + j]
-                            embeddings[idx] = v
-
-                            # cache insert
-                            if len(self._cache) >= self.CACHE_SIZE:
-                                self._cache.pop(next(iter(self._cache)))
-                            self._cache[self._hash(texts[idx])] = v
+                    self._cache[self._hash(texts[idx])] = v
 
             except Exception as e:
-                logger.error(f"[Embedder] Embedding failed: {e}")
+                logger.error(f"[Embedder] Encode failed: {e}")
 
-                # fallback for uncached
-                for idx in uncached_idx:
-                    embeddings[idx] = self._zero_vector()
+        # ───────── FALLBACK ─────────
+        for i, e in enumerate(embeddings):
+            if e is None:
+                embeddings[i] = self._zero_vector()
 
-        # ── FINAL STACK ───────────────────────
-        try:
-            result = np.vstack(embeddings)
-
-            if result.ndim != 2 or result.shape[1] != self.EXPECTED_DIM:
-                raise ValueError("Invalid final embedding shape")
-
-            return result
-
-        except Exception as e:
-            logger.error(f"[Embedder] Final assembly failed: {e}")
-            return np.vstack([self._zero_vector() for _ in texts])
+        return np.vstack(embeddings)
 
     # ─────────────────────────────────────────────
-    # FAST SINGLE
+    # SINGLE
     # ─────────────────────────────────────────────
     def embed_one(self, text: str) -> np.ndarray:
-        try:
-            return self.embed([text])[0]
-        except Exception:
-            return self._zero_vector()
+        return self.embed([text])[0]
