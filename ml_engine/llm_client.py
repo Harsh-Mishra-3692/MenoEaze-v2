@@ -1,94 +1,164 @@
-# llm_client.py — PRODUCTION FIXED (RAILWAY SAFE + NO CRASH)
+# llm_client.py — PRODUCTION v6 (L7/L9 HARDENED)
 
 import os
 import time
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from groq import Groq
 
 logger = logging.getLogger("menoeaze.llm")
 
 
+# ───────── CONFIG ─────────
+DEFAULT_MODEL = "llama3-70b-8192"
+DEFAULT_TEMP = 0.4
+DEFAULT_MAX_TOKENS = 600
+
+MAX_RETRIES = 2
+BACKOFF_BASE = 1.6
+TIMEOUT_GUARD = 20  # soft timeout tracking
+
+CIRCUIT_FAIL_THRESHOLD = 5
+CIRCUIT_RESET_SECONDS = 60
+
+
+# ───────── CLIENT ─────────
 class LLMClient:
 
     def __init__(self):
+
         self.api_key = os.getenv("GROQ_API_KEY")
+
+        self.model = DEFAULT_MODEL
+        self.temperature = DEFAULT_TEMP
+        self.max_tokens = DEFAULT_MAX_TOKENS
+
+        self._client: Optional[Groq] = None
+
+        # circuit breaker state
+        self._fail_count = 0
+        self._last_fail_time = 0
 
         if not self.api_key:
             logger.error("❌ GROQ_API_KEY missing → LLM disabled")
-            self.client = None
         else:
             try:
-                self.client = Groq(api_key=self.api_key)
+                self._client = Groq(api_key=self.api_key)
+                logger.info("✅ LLM initialized")
             except Exception as e:
                 logger.error(f"❌ Groq init failed: {e}")
-                self.client = None
+                self._client = None
 
-        self.model = "llama3-70b-8192"
-        self.temperature = 0.4
-        self.max_tokens = 600
+    # ───────── CIRCUIT BREAKER ─────────
+    def _circuit_open(self) -> bool:
+        if self._fail_count < CIRCUIT_FAIL_THRESHOLD:
+            return False
 
-    # ───────── CORE SAFE ─────────
+        if time.time() - self._last_fail_time > CIRCUIT_RESET_SECONDS:
+            logger.info("🔁 Circuit reset")
+            self._fail_count = 0
+            return False
+
+        return True
+
+    # ───────── CORE GENERATION ─────────
     def generate(self, prompt: str) -> Dict[str, Any]:
 
-        if not prompt:
-            return {"text": "", "fallback": True}
-
-        if not self.client:
-            logger.warning("⚠️ LLM client unavailable → fallback")
+        if not prompt or not prompt.strip():
             return {
-                "text": "Please consult a healthcare professional.",
-                "fallback": True
+                "text": "",
+                "fallback": True,
+                "error": "empty_prompt"
             }
 
-        try:
-            start = time.time()
+        if not self._client:
+            logger.warning("⚠️ LLM unavailable → fallback")
+            return self._fallback("no_client")
 
-            res = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-            )
+        if self._circuit_open():
+            logger.warning("⚠️ Circuit open → skipping LLM")
+            return self._fallback("circuit_open")
 
-            text = res.choices[0].message.content.strip()
+        attempt = 0
 
-            latency = time.time() - start
+        while attempt <= MAX_RETRIES:
+            try:
+                start = time.time()
 
-            if not text:
-                logger.warning("⚠️ Empty LLM response")
+                response = self._client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+
+                latency = time.time() - start
+
+                text = (
+                    response.choices[0].message.content.strip()
+                    if response and response.choices
+                    else ""
+                )
+
+                if not text:
+                    raise ValueError("empty_response")
+
+                # reset circuit on success
+                self._fail_count = 0
+
                 return {
-                    "text": "Please consult a healthcare professional.",
-                    "fallback": True
+                    "text": text,
+                    "latency": round(latency, 2),
+                    "fallback": False
                 }
 
-            return {
-                "text": text,
-                "latency": round(latency, 2),
-                "fallback": False
-            }
+            except Exception as e:
+                attempt += 1
+                self._fail_count += 1
+                self._last_fail_time = time.time()
 
-        except Exception as e:
-            logger.error(f"❌ LLM failed: {e}")
+                wait = min(5, BACKOFF_BASE ** attempt)
 
-            return {
-                "text": "Please consult a healthcare professional.",
-                "fallback": True
-            }
+                logger.warning(
+                    f"❌ LLM attempt {attempt} failed: {e} | retry in {wait:.2f}s"
+                )
+
+                time.sleep(wait)
+
+        # final failure
+        return self._fallback("max_retries_exceeded")
 
     # ───────── SAFE STRING ─────────
     def safe_generate(self, prompt: str) -> str:
         res = self.generate(prompt)
-        return res.get("text", "")
+        return res.get("text") or self._safe_message()
 
-    # ───────── HEALTH ─────────
+    # ───────── FALLBACK ─────────
+    def _fallback(self, reason: str) -> Dict[str, Any]:
+        logger.error(f"⚠️ LLM fallback triggered: {reason}")
+
+        return {
+            "text": self._safe_message(),
+            "fallback": True,
+            "error": reason
+        }
+
+    # ───────── SAFE MESSAGE ─────────
+    def _safe_message(self) -> str:
+        return (
+            "Based on the available information, your symptoms may be related "
+            "to hormonal changes. For accurate evaluation and personalized care, "
+            "please consult a qualified healthcare professional."
+        )
+
+    # ───────── HEALTH CHECK ─────────
     def health_check(self) -> bool:
-        if not self.client:
+        if not self._client:
             return False
 
         try:
-            res = self.generate("Say OK")
+            res = self.generate("Respond with: OK")
             return "ok" in res.get("text", "").lower()
-        except:
+        except Exception:
             return False
