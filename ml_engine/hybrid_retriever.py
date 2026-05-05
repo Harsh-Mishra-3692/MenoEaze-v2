@@ -1,4 +1,4 @@
-# hybrid_retriever.py — PRODUCTION v5 (NO SILENT DEGRADATION)
+# hybrid_retriever.py — PRODUCTION v6 (L7/L9 HARDENED, DEPLOYMENT SAFE)
 
 import logging
 import re
@@ -13,6 +13,9 @@ logger = logging.getLogger("menoeaze.hybrid")
 DEFAULT_K = 6
 MAX_QUERY_LENGTH = 500
 MAX_DOC_LENGTH = 800
+MAX_TABLE_FETCH = 60
+
+MIN_DOCS_THRESHOLD = 2
 
 _embedder = None
 _embedder_failed = False
@@ -46,9 +49,9 @@ def _get_embedder():
         try:
             logger.info("Loading HFEmbedder...")
             _embedder = HFEmbedder()
-            logger.info("HFEmbedder loaded successfully")
+            logger.info("HFEmbedder loaded")
         except Exception as e:
-            logger.error(f"❌ EMBEDDER FAILED: {e}")
+            logger.error(f"❌ Embedder failed permanently: {e}")
             _embedder_failed = True
             _embedder = None
 
@@ -57,6 +60,8 @@ def _get_embedder():
 
 # ───────── CLEAN ─────────
 def _clean(q: str) -> str:
+    if not isinstance(q, str):
+        return ""
     return re.sub(r"\s+", " ", q.lower()).strip()[:MAX_QUERY_LENGTH]
 
 
@@ -67,30 +72,63 @@ def _hard_fallback(k: int):
             "content": d["content"],
             "source": d["source"],
             "document_name": d["source"],
-            "score": 0.2,
+            "score": 0.25,
             "priority": 0.0,
         }
         for d in STATIC_FALLBACK_DOCS[:k]
     ]
 
 
-# ───────── SIMPLE KEYWORD MATCH (NEW) ─────────
+# ───────── DEDUP ─────────
+def _deduplicate(docs: List[Dict]) -> List[Dict]:
+    seen = set()
+    unique = []
+
+    for d in docs:
+        key = (d.get("content", "")[:120], d.get("source"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(d)
+
+    return unique
+
+
+# ───────── SCORE NORMALIZATION ─────────
+def _normalize_scores(docs: List[Dict]) -> List[Dict]:
+    if not docs:
+        return docs
+
+    scores = [d.get("score", 0.0) for d in docs]
+    max_score = max(scores) if scores else 1.0
+
+    if max_score == 0:
+        return docs
+
+    for d in docs:
+        d["score"] = d.get("score", 0.0) / max_score
+
+    return docs
+
+
+# ───────── KEYWORD SEARCH ─────────
 def _keyword_search(query: str, rows: List[Dict]):
     scored = []
+    q_words = set(query.split())
 
     for r in rows:
-        content = r.get("content", "").lower()
+        content = (r.get("content") or "").lower()
         if not content:
             continue
 
-        score = sum(1 for word in query.split() if word in content)
+        matches = sum(1 for word in q_words if word in content)
 
-        if score > 0:
+        if matches > 0:
             scored.append({
                 "content": content[:MAX_DOC_LENGTH],
                 "source": r.get("document_name", "table"),
                 "document_name": r.get("document_name", "table"),
-                "score": float(score),
+                "score": float(matches),
                 "priority": float(r.get("priority", 0.0)),
             })
 
@@ -103,7 +141,7 @@ def _vector_search(query: str, k: int):
     embedder = _get_embedder()
 
     if embedder is None:
-        logger.warning("⚠️ Embedder unavailable → skipping vector search")
+        logger.warning("⚠️ Embedder unavailable → vector search skipped")
         return []
 
     try:
@@ -123,11 +161,12 @@ def _vector_search(query: str, k: int):
 
         docs = []
         for r in res:
-            if not r.get("content"):
+            content = r.get("content")
+            if not content:
                 continue
 
             docs.append({
-                "content": r["content"][:MAX_DOC_LENGTH],
+                "content": content[:MAX_DOC_LENGTH],
                 "source": r.get("document_name", "db"),
                 "document_name": r.get("document_name", "db"),
                 "score": float(r.get("similarity", 0.0)),
@@ -141,19 +180,19 @@ def _vector_search(query: str, k: int):
         return []
 
 
-# ───────── TABLE + KEYWORD ─────────
+# ───────── TABLE SEARCH ─────────
 def _table_search(query: str, k: int):
     try:
-        rows = fetch_table("medical_documents", limit=50)
+        rows = fetch_table("medical_documents", limit=MAX_TABLE_FETCH)
 
         if not rows:
-            logger.warning("⚠️ No rows in medical_documents")
+            logger.warning("⚠️ No rows returned from medical_documents")
             return []
 
         docs = _keyword_search(query, rows)
 
         if not docs:
-            logger.warning("⚠️ Keyword search returned nothing")
+            logger.warning("⚠️ Keyword search yielded no results")
 
         return docs[:k]
 
@@ -173,19 +212,29 @@ def hybrid_retrieve(query: str, user_id: Optional[str] = None, final_k: int = DE
     query = _clean(query)
 
     # 1️⃣ VECTOR SEARCH
-    docs = _vector_search(query, final_k)
+    vector_docs = _vector_search(query, final_k)
 
-    # 2️⃣ TABLE + KEYWORD SEARCH
-    if len(docs) < 2:
-        docs += _table_search(query, final_k)
+    # 2️⃣ TABLE SEARCH
+    table_docs = []
+    if len(vector_docs) < MIN_DOCS_THRESHOLD:
+        table_docs = _table_search(query, final_k)
 
-    # 3️⃣ FINAL HARD FALLBACK
+    docs = vector_docs + table_docs
+
+    # 3️⃣ FALLBACK
     if not docs:
-        logger.warning("⚠️ USING STATIC FALLBACK (LAST RESORT)")
+        logger.warning("⚠️ Using static fallback (last resort)")
         docs = _hard_fallback(final_k)
 
-    # SORT
-    docs.sort(key=lambda x: x.get("score", 0), reverse=True)
+    # 4️⃣ CLEANUP
+    docs = _deduplicate(docs)
+    docs = _normalize_scores(docs)
+
+    # 5️⃣ SORT
+    docs.sort(
+        key=lambda x: x.get("score", 0) + 0.2 * x.get("priority", 0),
+        reverse=True
+    )
 
     latency = (time.time() - start) * 1000
     logger.info(f"[HYBRID] {len(docs)} docs | {latency:.1f}ms")
